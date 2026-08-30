@@ -174,11 +174,19 @@ brightness or colour for everything in it at once.
 
 ## Dragging devices between rooms
 
-Grab the ☰ handle on a device row and drop it on a room heading. Room headings
-grow while a drag is in flight, and the list stops scrolling for the duration —
-a Flickable otherwise claims the drag the moment it passes its threshold and
-you scroll the panel instead of moving the row. Dropping on **other** takes the
+Grab the ☰ handle at the left of a device row and drop it on a room heading.
+Room headings grow while a drag is in flight. Dropping on **other** takes the
 device out of every room.
+
+Dragging and scrolling are the same gesture, so they get different territory:
+the 24px handle column drags, the rest of the row still flicks the list. The
+handle sets `preventStealing`, without which a Flickable takes the grab the
+moment the pointer passes its own threshold and the panel scrolls instead of
+the row moving — this is why the first attempt did nothing.
+
+The drag logs `govee drag start` and `govee drop` to the journal
+(`journalctl --user -f | grep govee`); it cannot be exercised from a shell, so
+that is the only evidence of where it broke if it ever does again.
 
 The clickable room chips in a device's expansion do the same thing without the
 aim, and both call `rooms assign`.

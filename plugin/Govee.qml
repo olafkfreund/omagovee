@@ -295,6 +295,8 @@ BarWidget {
                     // "other" is not a room, it is the devices in none of them.
                     var target = roomItem.room.name === "other"
                       ? "none" : roomItem.room.name
+                    console.log("govee drop", drop.source.devName,
+                                "->", target)
                     if (drop.source.devRoom !== roomItem.room.name)
                       root.act(["rooms", "assign", target, drop.source.devName], "")
                     drop.accept()
@@ -442,47 +444,76 @@ BarWidget {
                       property string devName: devItem.dev.name
                       property string devRoom: roomItem.room.name
 
-                      Drag.active: gripArea.drag.active
+                      Drag.active: dragArea.drag.active
                       Drag.source: content
                       Drag.keys: ["govee-device"]
                       Drag.hotSpot.x: width / 2
                       Drag.hotSpot.y: height / 2
 
-                      Text {
-                        id: grip
+                      // Dragging and scrolling are the same gesture, so they
+                      // get different territory: this handle column drags, the
+                      // rest of the row still flicks the list.
+                      //
+                      // preventStealing is the load-bearing line. A Flickable
+                      // filters its children's mouse events and takes the grab
+                      // the moment the pointer passes its own threshold, so
+                      // without it the drag never starts and the panel scrolls
+                      // instead — which is exactly what it did.
+                      MouseArea {
+                        id: dragArea
                         anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "\u2630"
-                        color: root.bar ? root.bar.foreground : Color.foreground
-                        opacity: gripArea.containsMouse || gripArea.drag.active ? 0.9 : 0.35
-                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                        font.pixelSize: Style.font.caption
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: Style.space(24)
+                        hoverEnabled: true
+                        preventStealing: true
+                        cursorShape: drag.active ? Qt.ClosedHandCursor
+                                                 : Qt.OpenHandCursor
+                        drag.target: content
+                        drag.smoothed: false
+                        drag.threshold: 4
 
-                        MouseArea {
-                          id: gripArea
-                          anchors.fill: parent
-                          anchors.margins: -Style.space(4)
-                          hoverEnabled: true
-                          cursorShape: Qt.OpenHandCursor
-                          drag.target: content
-                          drag.smoothed: false
-                          onPressed: {
+                        // Announced once the drag is real, not on press: a
+                        // stray click should not make every room heading jump.
+                        onPositionChanged: {
+                          if (drag.active && root.dragName === "") {
                             root.dragName = devItem.dev.name
                             root.dragRoom = roomItem.room.name
+                            // Left in deliberately: this gesture cannot be
+                            // tested from a shell, so the journal is the only
+                            // evidence of where it broke.
+                            console.log("govee drag start", root.dragName,
+                                        "from", root.dragRoom)
                           }
-                          onReleased: {
-                            content.Drag.drop()
-                            content.x = 0
-                            content.y = 0
-                            root.dragName = ""
-                            root.dragRoom = ""
-                          }
+                        }
+                        onReleased: {
+                          if (drag.active) content.Drag.drop()
+                          content.x = 0
+                          content.y = 0
+                          root.dragName = ""
+                          root.dragRoom = ""
+                        }
+                        onCanceled: {
+                          content.x = 0
+                          content.y = 0
+                          root.dragName = ""
+                          root.dragRoom = ""
+                        }
+
+                        Text {
+                          anchors.centerIn: parent
+                          text: "\u2630"
+                          color: root.bar ? root.bar.foreground : Color.foreground
+                          opacity: dragArea.containsMouse || dragArea.drag.active
+                            ? 0.9 : 0.3
+                          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                          font.pixelSize: Style.font.caption
                         }
                       }
 
                       Text {
                         id: typeIcon
-                        anchors.left: grip.right
+                        anchors.left: dragArea.right
                         anchors.leftMargin: Style.space(6)
                         anchors.verticalCenter: parent.verticalCenter
                         text: root.kindIcon(devItem.dev.kind)
