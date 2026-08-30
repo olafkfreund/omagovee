@@ -73,8 +73,31 @@ omarchy restart shell
   firmware limit, not a bug here — they still work, just over the internet.
 - The LAN command names (`turn`, `brightness`, `colorwc`, `devStatus`) come
   from Govee's WLAN guide as reproduced by community integrations, not from a
-  primary doc that renders without JavaScript. If a model ignores a LAN command,
-  delete its entry from `~/.cache/omagovee/lan.json` to force the cloud path.
+  primary doc that renders without JavaScript. Verified working against H615A.
+  If a model ignores a LAN command, delete its entry from
+  `~/.cache/omagovee/lan.json` to force the cloud path.
+- **LAN writes are read back.** UDP is unacknowledged, and a dropped `turn` was
+  observed reporting success while the light stayed off. Every power/brightness
+  command is confirmed with a `devStatus` (~20ms) and resent once before the
+  command is allowed to claim it worked.
+- **Cloud state lags LAN commands.** After a LAN write the cloud keeps serving
+  the old value for a few seconds, which is why state is read over LAN first
+  whenever an ip is known.
+
+## Bluetooth
+
+Every Govee device here also advertises BLE at `wifi_mac + 2`, named e.g.
+`GBK_H615A_6E1D` or `GVH600C7C56`, and exposes Govee's control service
+`00010203-0405-0607-0809-0a0b0c0d1910`, characteristic `…2b11`
+(`write-without-response`). Twenty-byte packets: `0x33`, command
+(`01` power, `04` brightness, `05` colour), payload, zero padding, XOR checksum
+of the first 19 bytes.
+
+Confirmed working on the H615A strips — but **not implemented here**, on
+purpose. BLE only reaches one device at a time, needs a live connection BlueZ
+keeps dropping when idle, and is a reverse-engineered protocol rather than a
+published API. Once a device is on Wi-Fi the LAN path is faster and more
+reliable. Worth revisiting only for a device that can never join Wi-Fi.
 - The widget draws from `~/.cache/omagovee/state.json`, written after each
   action — an optimistic value, not a live query. Changing a light from the
   phone will not update the bar until the next command from here. Deliberate:

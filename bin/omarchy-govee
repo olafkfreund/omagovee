@@ -308,7 +308,23 @@ def apply(dev, kind, value):
     }[kind]
 
     if dev["ip"]:
-        lan_send(dev["ip"], *lan_cmd)
+        # UDP is unacknowledged: a dropped command is indistinguishable from a
+        # delivered one. Observed in practice — a lost `turn` left the light off
+        # while the command reported success. devStatus costs ~20ms, so read
+        # back and resend once rather than lie about it.
+        for attempt in range(2):
+            lan_send(dev["ip"], *lan_cmd)
+            if kind == "color":
+                break  # no cheap equality test for a colour we may have gamma-shifted
+            time.sleep(0.4)
+            status = lan_state(dev["ip"])
+            if status is None:
+                break  # device went quiet; the send may still have landed
+            got = status.get("onOff") if kind == "power" else status.get("brightness")
+            if got == value:
+                break
+        else:
+            die("%s did not accept %s=%s over LAN" % (dev["name"], kind, value))
     else:
         ctype, instance = cloud_cap
         cloud("/router/api/v1/device/control",
@@ -430,4 +446,9 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except BrokenPipeError:
+        sys.exit(0)  # `| head` closed the pipe; that is not a failure
+    except KeyboardInterrupt:
+        sys.exit(130)
