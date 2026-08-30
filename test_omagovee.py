@@ -67,6 +67,20 @@ def test_lan_send_reaches_the_wire():
     assert json.loads(got[0]) == {"msg": {"cmd": "brightness", "data": {"value": 42}}}
 
 
+def test_assign_room_moves_rather_than_copies():
+    """A device in two rooms fires twice for one `room:` command and draws
+    twice in the panel, so assignment must remove it from its old room."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        govee.CONFIG = tmp
+        govee.write_json(govee.rooms_path(), {"old": ["a", "b"], "keep": ["c"]})
+        rooms = govee.assign_room("new", ["a"])
+        assert rooms == {"old": ["b"], "keep": ["c"], "new": ["a"]}, rooms
+        rooms = govee.assign_room("none", ["b"])
+        assert "old" not in rooms, rooms          # empty room disappears
+        assert rooms == {"keep": ["c"], "new": ["a"]}, rooms
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

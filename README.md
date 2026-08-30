@@ -150,3 +150,23 @@ reliable. Worth revisiting only for a device that can never join Wi-Fi.
   its popup on `BarWidget` + `KeyboardPanel` instead.
 - Device list is cached 24h (`~/.cache/omagovee/devices.json`); delete it after
   adding a lamp.
+
+
+## Friendly names and rooms
+
+`label` gives a device a name for the panel only — the device keeps the name
+Govee knows it by, so rooms, scenes and every existing command keep working
+when the label changes. A label is also accepted anywhere a device name is:
+
+    omarchy-govee label shelf1 "Desk Shelf"
+    omarchy-govee on "Desk Shelf"
+    omarchy-govee label shelf1              # clears it
+
+Rooms hold each device exactly once — `rooms assign` removes it from whatever
+room it was in, because a device in two rooms fires twice for one `room:`
+command. `rooms rename` renames the key, so `room:` targets and any scene
+referring to the old name must be updated with it.
+
+In the panel: click a **device** name to open its label field, room chips,
+brightness and colours; click a **room** name to rename the room and set
+brightness or colour for everything in it at once.

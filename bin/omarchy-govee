@@ -275,8 +275,10 @@ def resolve(name=None):
             return devs[0]
         die("Several devices — name one, or set a default:\n  %s"
             % "\n  ".join(d["name"] for d in devs))
+    labels = load_labels()
     matches = [d for d in devs
-               if name.lower() in (d["name"] or "").lower() or name == d["mac"]]
+               if name.lower() in (d["name"] or "").lower() or name == d["mac"]
+               or name.lower() in labels.get(d["name"], "").lower()]
     if not matches:
         die("No device matching %r. Known: %s"
             % (name, ", ".join(d["name"] for d in devs)))
@@ -303,6 +305,42 @@ def auto_rooms(devs):
         if match:
             groups.setdefault(match.group(0).lower(), []).append(dev["name"])
     return {k: v for k, v in groups.items() if len(v) > 1}
+
+
+def labels_path():
+    return os.path.join(CONFIG, "labels.json")
+
+
+def load_labels():
+    """{device name: friendly name}. Cosmetic only — the device keeps the name
+    Govee knows it by, so every command, scene and room file stays valid if the
+    label changes."""
+    return read_json(labels_path(), {}) or {}
+
+
+def set_label(name, text):
+    labels = load_labels()
+    if text:
+        labels[name] = text
+    else:
+        labels.pop(name, None)
+    write_json(labels_path(), labels)
+    return labels
+
+
+def assign_room(room, names):
+    """Move devices into `room`, or out of every room when room is 'none'.
+    A device lives in one room: leaving it in two makes `room:` targets fire
+    twice and the panel draw it twice."""
+    rooms = load_rooms()
+    for key in list(rooms):
+        rooms[key] = [n for n in rooms[key] if n not in names]
+        if not rooms[key]:
+            del rooms[key]
+    if room != "none":
+        rooms.setdefault(room, []).extend(names)
+    write_json(rooms_path(), rooms)
+    return rooms
 
 
 def scenes_path():
@@ -421,8 +459,11 @@ def dump():
     a panel that takes five seconds to open."""
     devs = devices()
 
+    labels = load_labels()
+
     def annotate(dev):
         entry = dict(dev)
+        entry["label"] = labels.get(dev["name"], "")
         try:
             state = power_state(dev)
             entry.update(online=state["online"], power=state["power"])
@@ -451,7 +492,9 @@ USAGE = __doc__.split("\n\n")[0] + """
   omarchy-govee color HEX|name [dev]   %s
   omarchy-govee state [dev]
   omarchy-govee default <dev>        remember which device bare commands hit
-  omarchy-govee rooms [--auto | <room> <dev>...]
+  omarchy-govee rooms [--auto | <room> <dev>... |
+                       assign <room|none> <dev>... | rename <old> <new>]
+  omarchy-govee label <dev> [friendly name]   cosmetic name for the panel
   omarchy-govee scene [name]         run a scene, or list them
   omarchy-govee dump                 JSON of everything, for the panel
 
@@ -545,9 +588,29 @@ def main(argv):
         print("scene: %s" % args[0])
         return 0
 
+    if cmd == "label":
+        if not args:
+            die("usage: omarchy-govee label <device> [friendly name]")
+        dev = resolve(args[0])
+        labels = set_label(dev["name"], " ".join(args[1:]).strip())
+        print("%s: %s" % (dev["name"], labels.get(dev["name"], "(no label)")))
+        return 0
+
     if cmd == "rooms":
         current = load_rooms()
-        if args and args[0] == "--auto":
+        if args and args[0] == "assign":
+            if len(args) < 3:
+                die("usage: omarchy-govee rooms assign <room|none> <device>...")
+            current = assign_room(args[1],
+                                  [resolve(n)["name"] for n in args[2:]])
+        elif args and args[0] == "rename":
+            if len(args) != 3:
+                die("usage: omarchy-govee rooms rename <old> <new>")
+            if args[1] not in current:
+                die("No room %r. Known: %s" % (args[1], ", ".join(current) or "none"))
+            current[args[2]] = current.pop(args[1])
+            write_json(rooms_path(), current)
+        elif args and args[0] == "--auto":
             current = auto_rooms(devices())
             write_json(rooms_path(), current)
         elif args:

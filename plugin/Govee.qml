@@ -26,11 +26,15 @@ BarWidget {
 
   property var devices: []
   property var roomList: []      // [{ name, members: [device] }]
+  property var roomNames: []     // room keys only, for the assign chips
   property var scenes: []
   property string expandedName: ""
   property bool loading: false
   property bool lit: false
   property string busyName: ""
+  // PanelKeyCatcher eats plain keys before descendants see them; while a name
+  // field is focused it has to stand down or "a" toggles a light mid-word.
+  property int editors: 0
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -105,6 +109,7 @@ BarWidget {
       if (!assigned[data.devices[k].name]) rest.push(data.devices[k])
     if (rest.length > 0) list.push({ name: "other", members: rest })
     root.roomList = list
+    root.roomNames = names
 
     var anyOn = false
     for (var m = 0; m < root.devices.length; m++)
@@ -154,10 +159,10 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // nf-fa-lightbulb_o when anything is lit, nf-fa-power_off when not.
-    text: root.lit ? "\uf0eb" : "\uf011"
-    slotSize: Style.bar.statusSlot
-    fontSize: Style.font.caption
+    // nf-md-lightbulb_on / nf-md-lightbulb_outline. The size is deliberately
+    // NOT overridden: BarIconButton defaults to Style.bar.iconFont in the
+    // iconSlot, which is what every other icon on the bar is drawn at.
+    text: root.lit ? "󰛨" : "󰌶"
     tooltipText: "Lights"
     onPressed: function (b) {
       if (b === Qt.RightButton) root.act(["toggle"], "")
@@ -178,6 +183,7 @@ BarWidget {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      blocked: root.editors > 0
       onCloseRequested: root.close()
 
       Flickable {
@@ -236,11 +242,17 @@ BarWidget {
           PanelSeparator { width: parent.width }
 
           // ---------- rooms and devices ----------
+          // Delegates name their model (`room`, `dev`) instead of walking
+          // parent.parent.parent: the chains broke every time the tree gained
+          // a level, and silently — a wrong `parent` reads as undefined.
           Repeater {
             model: root.roomList
 
             delegate: Column {
+              id: roomItem
               required property var modelData
+              readonly property var room: modelData
+              readonly property bool editing: root.expandedName === "room:" + room.name
               width: column.width
               spacing: Style.space(4)
 
@@ -252,8 +264,14 @@ BarWidget {
                   id: roomHeader
                   anchors.left: parent.left
                   anchors.verticalCenter: parent.verticalCenter
-                  text: parent.parent.modelData.name
+                  text: roomItem.room.name
                   foreground: root.bar ? root.bar.foreground : Color.foreground
+
+                  MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.expandedName =
+                      roomItem.editing ? "" : "room:" + roomItem.room.name
+                  }
                 }
 
                 Row {
@@ -265,26 +283,94 @@ BarWidget {
                     iconText: "\uf011"
                     tooltipText: "All off"
                     foreground: root.bar ? root.bar.foreground : Color.foreground
-                    onClicked: root.act(["off", "room:" + parent.parent.parent.modelData.name], "")
+                    onClicked: root.act(["off", "room:" + roomItem.room.name], "")
                   }
                   PanelActionButton {
                     iconText: "\uf0eb"
                     tooltipText: "All on"
                     foreground: root.bar ? root.bar.foreground : Color.foreground
-                    onClicked: root.act(["on", "room:" + parent.parent.parent.modelData.name], "")
+                    onClicked: root.act(["on", "room:" + roomItem.room.name], "")
                   }
                 }
               }
 
+              // ----- whole-room controls, shown by clicking the room name -----
+              Column {
+                width: parent.width
+                spacing: Style.space(6)
+                visible: roomItem.editing
+                height: visible ? implicitHeight : 0
+
+                TextField {
+                  width: parent.width
+                  text: roomItem.room.name
+                  placeholderText: "Room name"
+                  verticalPadding: Style.space(3)
+                  foreground: root.bar ? root.bar.foreground : Color.foreground
+                  enabled: roomItem.room.name !== "other"
+                  onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
+                  onAccepted: {
+                    if (text && text !== roomItem.room.name) {
+                      root.act(["rooms", "rename", roomItem.room.name, text], "")
+                      root.expandedName = ""
+                    }
+                    focus = false
+                  }
+                }
+
+                PanelSlider {
+                  width: parent.width
+                  bar: root.bar
+                  minimum: 1
+                  maximum: 100
+                  step: 1
+                  integer: true
+                  value: 50
+                  onReleased: function (v) {
+                    root.act(["brightness", String(Math.round(v)),
+                              "room:" + roomItem.room.name], "")
+                  }
+                }
+
+                Flow {
+                  width: parent.width
+                  spacing: Style.space(5)
+
+                  Repeater {
+                    model: root.swatches
+                    delegate: Rectangle {
+                      required property var modelData
+                      width: Style.space(20)
+                      height: Style.space(20)
+                      radius: Style.cornerRadius > 0 ? width / 2 : 0
+                      color: modelData.rgb
+                      border.width: roomSwatch.containsMouse ? 2 : 1
+                      border.color: root.bar ? root.bar.foreground : Color.foreground
+
+                      MouseArea {
+                        id: roomSwatch
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: root.act(["color", parent.modelData.name,
+                                             "room:" + roomItem.room.name], "")
+                      }
+                    }
+                  }
+                }
+
+                PanelSeparator { width: parent.width }
+              }
+
               Repeater {
-                model: parent.modelData.members
+                model: roomItem.room.members
 
                 delegate: Column {
+                  id: devItem
                   required property var modelData
+                  readonly property var dev: modelData
+                  readonly property bool isExpanded: root.expandedName === dev.name
                   width: column.width
                   spacing: Style.space(4)
-
-                  readonly property bool isExpanded: root.expandedName === modelData.name
 
                   // ----- device row -----
                   Item {
@@ -295,19 +381,18 @@ BarWidget {
                       id: nameText
                       anchors.left: parent.left
                       anchors.verticalCenter: parent.verticalCenter
-                      text: parent.parent.modelData.name
-                        + (parent.parent.modelData.online ? "" : "  (offline)")
-                        + (parent.parent.modelData.ip ? "  ·  lan" : "")
+                      text: (devItem.dev.label || devItem.dev.name)
+                        + (devItem.dev.online ? "" : "  (offline)")
+                        + (devItem.dev.ip ? "  ·  lan" : "")
                       color: root.bar ? root.bar.foreground : Color.foreground
-                      opacity: parent.parent.modelData.online ? 1.0 : 0.45
+                      opacity: devItem.dev.online ? 1.0 : 0.45
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
 
                       MouseArea {
                         anchors.fill: parent
                         onClicked: root.expandedName =
-                          root.expandedName === nameText.parent.parent.modelData.name
-                            ? "" : nameText.parent.parent.modelData.name
+                          devItem.isExpanded ? "" : devItem.dev.name
                       }
                     }
 
@@ -315,13 +400,12 @@ BarWidget {
                       id: sw
                       anchors.right: parent.right
                       anchors.verticalCenter: parent.verticalCenter
-                      checked: parent.parent.modelData.power === 1
-                      interactive: parent.parent.modelData.online
-                      busy: root.busyName === parent.parent.modelData.name
+                      checked: devItem.dev.power === 1
+                      interactive: devItem.dev.online
+                      busy: root.busyName === devItem.dev.name
                       foreground: root.bar ? root.bar.foreground : Color.foreground
-                      onToggled: root.act(
-                        [checked ? "off" : "on", sw.parent.parent.modelData.name],
-                        sw.parent.parent.modelData.name)
+                      onToggled: root.act([checked ? "off" : "on", devItem.dev.name],
+                                          devItem.dev.name)
                     }
                   }
 
@@ -329,8 +413,64 @@ BarWidget {
                   Column {
                     width: parent.width
                     spacing: Style.space(6)
-                    visible: parent.isExpanded
+                    visible: devItem.isExpanded
                     height: visible ? implicitHeight : 0
+
+                    TextField {
+                      width: parent.width
+                      text: devItem.dev.label
+                      // The device keeps the name Govee knows it by; this only
+                      // changes what the panel calls it. Empty clears it.
+                      placeholderText: "Friendly name for " + devItem.dev.name
+                      verticalPadding: Style.space(3)
+                      foreground: root.bar ? root.bar.foreground : Color.foreground
+                      onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
+                      onAccepted: {
+                        root.act(["label", devItem.dev.name].concat(
+                          text ? [text] : []), "")
+                        focus = false
+                      }
+                    }
+
+                    Flow {
+                      width: parent.width
+                      spacing: Style.space(5)
+
+                      Repeater {
+                        model: root.roomNames.concat(["none"])
+                        delegate: Rectangle {
+                          required property string modelData
+                          readonly property bool current:
+                            modelData === roomItem.room.name
+                          radius: Style.cornerRadius
+                          color: current || chipMouse.containsMouse
+                            ? Style.selectedFillFor(root.bar.foreground, Color.accent)
+                            : "transparent"
+                          border.width: 1
+                          border.color: Style.selectedFillFor(root.bar.foreground,
+                                                              Color.accent)
+                          implicitWidth: chipLabel.implicitWidth + Style.space(12)
+                          implicitHeight: chipLabel.implicitHeight + Style.space(6)
+
+                          Text {
+                            id: chipLabel
+                            anchors.centerIn: parent
+                            text: parent.modelData
+                            color: root.bar ? root.bar.foreground : Color.foreground
+                            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                            font.pixelSize: Style.font.caption
+                          }
+
+                          MouseArea {
+                            id: chipMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: root.act(["rooms", "assign",
+                                                 parent.modelData, devItem.dev.name], "")
+                          }
+                        }
+                      }
+                    }
 
                     PanelSlider {
                       width: parent.width
@@ -341,9 +481,8 @@ BarWidget {
                       integer: true
                       value: 50
                       onReleased: function (v) {
-                        root.act(["brightness", String(Math.round(v)),
-                                  parent.parent.modelData.name],
-                                 parent.parent.modelData.name)
+                        root.act(["brightness", String(Math.round(v)), devItem.dev.name],
+                                 devItem.dev.name)
                       }
                     }
 
@@ -366,10 +505,8 @@ BarWidget {
                             id: swatchMouse
                             anchors.fill: parent
                             hoverEnabled: true
-                            onClicked: root.act(
-                              ["color", parent.modelData.name,
-                               parent.parent.parent.parent.modelData.name],
-                              parent.parent.parent.parent.modelData.name)
+                            onClicked: root.act(["color", parent.modelData.name,
+                                                 devItem.dev.name], devItem.dev.name)
                           }
                         }
                       }
