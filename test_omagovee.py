@@ -5,6 +5,7 @@ light doing the wrong thing rather than an error. Run: python3 test_omagovee.py
 Transport is not covered: it needs a real lamp on the LAN.
 """
 
+import os
 import importlib.util
 import json
 import socket
@@ -65,6 +66,20 @@ def test_lan_send_reaches_the_wire():
     lamp.close()
     assert got, "nothing arrived on port %d" % govee.PORT_CMD
     assert json.loads(got[0]) == {"msg": {"cmd": "brightness", "data": {"value": 42}}}
+
+
+def test_device_kind_prefers_the_longest_prefix():
+    """H6072 is a floor lamp inside the H60 bulb range: a plain startswith scan
+    in dict order would call it a bulb depending on insertion order."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        govee.CONFIG = tmp
+        assert govee.device_kind("H6072") == "lamp"
+        assert govee.device_kind("H600C") == "bulb"
+        assert govee.device_kind("H615A") == "strip"
+        assert govee.device_kind("H9999") == "bulb"          # unknown -> bulb
+        govee.write_json(os.path.join(tmp, "icons.json"), {"H615A": "lamp"})
+        assert govee.device_kind("H615A") == "lamp"          # override wins
 
 
 def test_assign_room_moves_rather_than_copies():

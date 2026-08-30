@@ -35,9 +35,28 @@ BarWidget {
   // PanelKeyCatcher eats plain keys before descendants see them; while a name
   // field is focused it has to stand down or "a" toggles a light mid-word.
   property int editors: 0
+  // Name of the device currently being dragged, "" when none. Three things
+  // read it: the Flickable (stops scrolling), the delegates (raise z so the
+  // dragged row is not painted under the sections below it), and the room
+  // headers (grow into a target you can actually hit).
+  property string dragName: ""
+  property string dragRoom: ""
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+  // nf-md glyphs per device kind; `kind` comes from the CLI, which is the one
+  // place that knows how to read a Govee SKU.
+  readonly property var kindIcons: {
+    "bulb":   "󰌵",
+    "strip":  "󰟕",
+    "string": "󱊺",
+    "lamp":   "󰚵"
+  }
+
+  function kindIcon(kind) {
+    return kindIcons[kind] || kindIcons["bulb"]
+  }
 
   readonly property var swatches: [
     { name: "warm",   rgb: "#ff9329" },
@@ -191,6 +210,10 @@ BarWidget {
         contentHeight: column.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
+        // A Flickable claims any drag that passes its threshold, so a drag
+        // that started on a grip would scroll the list instead of moving the
+        // row. It stands down for the duration.
+        interactive: root.dragName === ""
 
         Column {
           id: column
@@ -255,10 +278,38 @@ BarWidget {
               readonly property bool editing: root.expandedName === "room:" + room.name
               width: column.width
               spacing: Style.space(4)
+              z: root.dragRoom === room.name ? 100 : 0
 
               Item {
                 width: parent.width
+                // Grows during a drag: a one-line header is a miserable thing
+                // to aim at.
                 implicitHeight: roomHeader.implicitHeight
+                  + (root.dragName !== "" ? Style.space(14) : 0)
+
+                DropArea {
+                  id: roomDrop
+                  anchors.fill: parent
+                  keys: ["govee-device"]
+                  onDropped: function (drop) {
+                    // "other" is not a room, it is the devices in none of them.
+                    var target = roomItem.room.name === "other"
+                      ? "none" : roomItem.room.name
+                    if (drop.source.devRoom !== roomItem.room.name)
+                      root.act(["rooms", "assign", target, drop.source.devName], "")
+                    drop.accept()
+                  }
+                }
+
+                Rectangle {
+                  anchors.fill: parent
+                  z: -1
+                  visible: roomDrop.containsDrag
+                  radius: Style.cornerRadius
+                  color: "transparent"
+                  border.width: 1
+                  border.color: Style.selectedFillFor(root.bar.foreground, Color.accent)
+                }
 
                 PanelSectionHeader {
                   id: roomHeader
@@ -376,36 +427,102 @@ BarWidget {
                   Item {
                     width: parent.width
                     implicitHeight: Math.max(nameText.implicitHeight, sw.implicitHeight)
+                    z: root.dragName === devItem.dev.name ? 100 : 0
 
-                    Text {
-                      id: nameText
-                      anchors.left: parent.left
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: (devItem.dev.label || devItem.dev.name)
-                        + (devItem.dev.online ? "" : "  (offline)")
-                        + (devItem.dev.ip ? "  ·  lan" : "")
-                      color: root.bar ? root.bar.foreground : Color.foreground
-                      opacity: devItem.dev.online ? 1.0 : 0.45
-                      font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                      font.pixelSize: Style.font.caption
+                    // Only `content` moves while dragging. The row keeps its
+                    // slot in the Column, so the list does not reflow under
+                    // the cursor mid-drag and the drop lands where you aimed.
+                    Item {
+                      id: content
+                      width: parent.width
+                      height: parent.height
+                      opacity: Drag.active ? 0.6 : 1.0
 
-                      MouseArea {
-                        anchors.fill: parent
-                        onClicked: root.expandedName =
-                          devItem.isExpanded ? "" : devItem.dev.name
+                      // Read back off `drop.source` by the room that catches it.
+                      property string devName: devItem.dev.name
+                      property string devRoom: roomItem.room.name
+
+                      Drag.active: gripArea.drag.active
+                      Drag.source: content
+                      Drag.keys: ["govee-device"]
+                      Drag.hotSpot.x: width / 2
+                      Drag.hotSpot.y: height / 2
+
+                      Text {
+                        id: grip
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "\u2630"
+                        color: root.bar ? root.bar.foreground : Color.foreground
+                        opacity: gripArea.containsMouse || gripArea.drag.active ? 0.9 : 0.35
+                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                        font.pixelSize: Style.font.caption
+
+                        MouseArea {
+                          id: gripArea
+                          anchors.fill: parent
+                          anchors.margins: -Style.space(4)
+                          hoverEnabled: true
+                          cursorShape: Qt.OpenHandCursor
+                          drag.target: content
+                          drag.smoothed: false
+                          onPressed: {
+                            root.dragName = devItem.dev.name
+                            root.dragRoom = roomItem.room.name
+                          }
+                          onReleased: {
+                            content.Drag.drop()
+                            content.x = 0
+                            content.y = 0
+                            root.dragName = ""
+                            root.dragRoom = ""
+                          }
+                        }
                       }
-                    }
 
-                    ToggleSwitch {
-                      id: sw
-                      anchors.right: parent.right
-                      anchors.verticalCenter: parent.verticalCenter
-                      checked: devItem.dev.power === 1
-                      interactive: devItem.dev.online
-                      busy: root.busyName === devItem.dev.name
-                      foreground: root.bar ? root.bar.foreground : Color.foreground
-                      onToggled: root.act([checked ? "off" : "on", devItem.dev.name],
-                                          devItem.dev.name)
+                      Text {
+                        id: typeIcon
+                        anchors.left: grip.right
+                        anchors.leftMargin: Style.space(6)
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.kindIcon(devItem.dev.kind)
+                        color: root.bar ? root.bar.foreground : Color.foreground
+                        opacity: devItem.dev.online ? 0.85 : 0.35
+                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      Text {
+                        id: nameText
+                        anchors.left: typeIcon.right
+                        anchors.leftMargin: Style.space(6)
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: (devItem.dev.label || devItem.dev.name)
+                          + (devItem.dev.online ? "" : "  (offline)")
+                          + (devItem.dev.ip ? "  ·  lan" : "")
+                        color: root.bar ? root.bar.foreground : Color.foreground
+                        opacity: devItem.dev.online ? 1.0 : 0.45
+                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                        font.pixelSize: Style.font.caption
+
+                        MouseArea {
+                          anchors.fill: parent
+                          onClicked: root.expandedName =
+                            devItem.isExpanded ? "" : devItem.dev.name
+                        }
+                      }
+
+                      ToggleSwitch {
+                        id: sw
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        checked: devItem.dev.power === 1
+                        interactive: devItem.dev.online
+                        busy: root.busyName === devItem.dev.name
+                        foreground: root.bar ? root.bar.foreground : Color.foreground
+                        onToggled: root.act([checked ? "off" : "on", devItem.dev.name],
+                                            devItem.dev.name)
+                      }
                     }
                   }
 

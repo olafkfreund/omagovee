@@ -170,3 +170,27 @@ referring to the old name must be updated with it.
 In the panel: click a **device** name to open its label field, room chips,
 brightness and colours; click a **room** name to rename the room and set
 brightness or colour for everything in it at once.
+
+
+## Dragging devices between rooms
+
+Grab the ☰ handle on a device row and drop it on a room heading. Room headings
+grow while a drag is in flight, and the list stops scrolling for the duration —
+a Flickable otherwise claims the drag the moment it passes its threshold and
+you scroll the panel instead of moving the row. Dropping on **other** takes the
+device out of every room.
+
+The clickable room chips in a device's expansion do the same thing without the
+aim, and both call `rooms assign`.
+
+## Device icons
+
+Govee reports every light as `devices.types.light` with the same capability
+list whether it is a bulb, a strip or a floor lamp, and publishes no SKU-to-
+product table. The form factor is therefore read from the model number by the
+prefix table in `KINDS` (longest prefix wins, unknown models draw as a bulb).
+To correct one without touching the code:
+
+    echo '{"H6072": "lamp"}' > ~/.config/omagovee/icons.json
+
+Known kinds: `bulb`, `strip`, `string`, `lamp`.

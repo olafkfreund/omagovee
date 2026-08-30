@@ -307,6 +307,31 @@ def auto_rooms(devs):
     return {k: v for k, v in groups.items() if len(v) > 1}
 
 
+# Govee publishes no SKU -> product-type mapping: the API reports every light
+# as `devices.types.light` with identical capabilities whether it is a bulb, a
+# strip or a floor lamp, so the form factor can only come from the model
+# number. Longest prefix wins. Anything unlisted is drawn as a bulb; to correct
+# one, put {"H6072": "lamp"} in ~/.config/omagovee/icons.json rather than
+# editing this table.
+KINDS = {
+    "H61": "strip",    # H615A and the rest of the LED strip line
+    "H70": "string",   # string / outdoor lights
+    "H6072": "lamp", "H6076": "lamp", "H6078": "lamp",  # floor lamps
+    "H60": "bulb",     # H600C, H600D and the bulb family
+    "H14": "bulb",     # H14C0 Edison bulb
+}
+
+
+def device_kind(sku):
+    overrides = read_json(os.path.join(CONFIG, "icons.json"), {}) or {}
+    if sku in overrides:
+        return overrides[sku]
+    for prefix in sorted(KINDS, key=len, reverse=True):
+        if sku.startswith(prefix):
+            return KINDS[prefix]
+    return "bulb"
+
+
 def labels_path():
     return os.path.join(CONFIG, "labels.json")
 
@@ -464,6 +489,7 @@ def dump():
     def annotate(dev):
         entry = dict(dev)
         entry["label"] = labels.get(dev["name"], "")
+        entry["kind"] = device_kind(dev["sku"])
         try:
             state = power_state(dev)
             entry.update(online=state["online"], power=state["power"])
