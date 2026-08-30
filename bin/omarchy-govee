@@ -218,7 +218,12 @@ def cloud(path, body=None):
         method="POST" if body is not None else "GET")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.load(resp)
+            body = json.load(resp)
+        # Govee answers a rejected command with HTTP 200 and code 400 in the
+        # body. Trusting the status line makes every failure look like a win.
+        if body.get("code") not in (200, None):
+            die("Govee: %s (code %s)" % (body.get("msg", "?"), body.get("code")))
+        return body
     except urllib.error.HTTPError as exc:
         die("Govee API %s: %s" % (exc.code, exc.read().decode()[:200]))
     except urllib.error.URLError as exc:
@@ -313,18 +318,22 @@ def apply(dev, kind, value):
 
 
 def power_state(dev):
-    """1/0, or None if nothing will tell us."""
+    """{"online": bool, "power": 0|1|None}. `power` is meaningless when the
+    device is offline — the cloud keeps serving its last known value."""
     if dev["ip"]:
         data = lan_state(dev["ip"])
         if data and "onOff" in data:
-            return int(data["onOff"])
+            return {"online": True, "power": int(data["onOff"])}
     resp = cloud("/router/api/v1/device/state",
                  {"requestId": "omagovee", "payload":
                   {"sku": dev["sku"], "device": dev["mac"]}})
+    out = {"online": True, "power": None}
     for cap in resp.get("payload", {}).get("capabilities", []):
-        if cap.get("instance") == "powerSwitch":
-            return int(cap.get("state", {}).get("value", 0))
-    return None
+        if cap.get("instance") == "online":
+            out["online"] = bool(cap.get("state", {}).get("value", True))
+        elif cap.get("instance") == "powerSwitch":
+            out["power"] = int(cap.get("state", {}).get("value", 0))
+    return out
 
 
 # --- cli --------------------------------------------------------------------
@@ -379,10 +388,12 @@ def main(argv):
     if cmd == "toggle":
         dev = resolve(args[0] if args else None)
         current = power_state(dev)
-        if current is None:
+        if not current["online"]:
+            die("%s is offline — check its power and Wi-Fi" % dev["name"])
+        if current["power"] is None:
             die("Could not read state of %s" % dev["name"])
-        apply(dev, "power", 0 if current else 1)
-        print("%s: %s" % (dev["name"], "off" if current else "on"))
+        apply(dev, "power", 0 if current["power"] else 1)
+        print("%s: %s" % (dev["name"], "off" if current["power"] else "on"))
         return 0
 
     if cmd == "brightness":
@@ -408,8 +419,11 @@ def main(argv):
     if cmd == "state":
         dev = resolve(args[0] if args else None)
         current = power_state(dev)
+        if not current["online"]:
+            print("%s: offline" % dev["name"])
+            return 1
         print("%s: %s" % (dev["name"],
-                          "unknown" if current is None else ("on" if current else "off")))
+                          {None: "unknown", 0: "off", 1: "on"}[current["power"]]))
         return 0
 
     die("unknown command %r\n\n%s" % (cmd, USAGE), 2)
