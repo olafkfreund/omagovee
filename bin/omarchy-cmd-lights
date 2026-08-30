@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# omarchy:summary=Pick a Govee light and change it
+# omarchy:args=[device]
+# omarchy:examples=omarchy-cmd-lights | omarchy-cmd-lights desk
+
+# Interactive front end for omarchy-govee: the widget and the menu row both
+# land here, because gum needs a terminal and the bar cannot give it one.
+
+device=${1:-}
+if [[ -z $device ]]; then
+  # Cached list — no API call unless the cache is cold.
+  device=$(omarchy-govee list | gum choose --header "Light:" | awk '{print $1}' || true)
+  [[ -n $device ]] || exit 0
+fi
+
+action=$(gum choose --header "$device:" \
+  "toggle" "on" "off" "brightness" "colour" || true)
+[[ -n $action ]] || exit 0
+
+case $action in
+  toggle | on | off) args=("$action" "$device") ;;
+  brightness)
+    level=$(gum choose --header "Brightness:" 100 75 50 25 10 || true)
+    [[ -n $level ]] || exit 0
+    args=(brightness "$level" "$device")
+    ;;
+  colour)
+    colour=$(gum choose --header "Colour:" \
+      warm cool white red orange yellow green blue purple pink || true)
+    [[ -n $colour ]] || exit 0
+    args=(color "$colour" "$device")
+    ;;
+esac
+
+if err=$(omarchy-govee "${args[@]}" 2>&1 >/dev/null); then
+  notify-send -a Omarchy "Govee" "$device: $action" || true
+else
+  # A light that silently ignored you is worse than one that says why.
+  notify-send -u critical -a Omarchy "Govee failed" "${err:-omarchy-govee $action failed}"
+  exit 1
+fi

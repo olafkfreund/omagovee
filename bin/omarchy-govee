@@ -1,0 +1,419 @@
+#!/usr/bin/env python3
+"""Control Govee lights from the Omarchy desktop.
+
+# omarchy:summary=Control Govee lights (LAN if reachable, cloud otherwise)
+# omarchy:args=scan|list|on|off|toggle|brightness N|color HEX|state [device]
+# omarchy:examples=omarchy-govee toggle | omarchy-govee color ff8800 desk
+
+Two transports, picked per device:
+  LAN   — UDP, instant, no rate limit, needs "LAN Control" enabled per device
+          in the Govee Home app. Found by `scan`, cached with the device MAC.
+  cloud — https://openapi.api.govee.com, needs an API key, works for every
+          model. 120 control req/min/device.
+
+Stdlib only on purpose: this runs from a bar widget click, so it must start
+fast and never depend on jq/curl being installed.
+"""
+
+import json
+import os
+import socket
+import struct
+import sys
+import time
+import urllib.error
+import urllib.request
+
+API = "https://openapi.api.govee.com"
+CONFIG = os.path.expanduser(os.environ.get("OMAGOVEE_CONFIG", "~/.config/omagovee"))
+CACHE = os.path.expanduser(os.environ.get("OMAGOVEE_CACHE", "~/.cache/omagovee"))
+MCAST, PORT_REQ, PORT_RX, PORT_CMD = "239.255.255.250", 4001, 4002, 4003
+
+COLORS = {
+    "red": 0xFF0000, "green": 0x00FF00, "blue": 0x0000FF, "white": 0xFFFFFF,
+    "warm": 0xFF9329, "cool": 0xCCE0FF, "orange": 0xFF8800, "purple": 0x8000FF,
+    "pink": 0xFF40A0, "yellow": 0xFFDD00,
+}
+
+
+# --- payload builders (pure, covered by test_omagovee.py) -------------------
+
+def cloud_payload(sku, mac, ctype, instance, value, req_id="omagovee"):
+    return {
+        "requestId": req_id,
+        "payload": {
+            "sku": sku,
+            "device": mac,
+            "capability": {"type": ctype, "instance": instance, "value": value},
+        },
+    }
+
+
+def lan_payload(cmd, data):
+    return {"msg": {"cmd": cmd, "data": data}}
+
+
+def parse_color(spec):
+    """'ff8800', '#ff8800' or a name -> 24-bit int. Raises ValueError."""
+    if spec.lower() in COLORS:
+        return COLORS[spec.lower()]
+    value = int(spec.lstrip("#"), 16)
+    if not 0 <= value <= 0xFFFFFF:
+        raise ValueError("colour out of range: %s" % spec)
+    return value
+
+
+def rgb(value):
+    return {"r": value >> 16 & 0xFF, "g": value >> 8 & 0xFF, "b": value & 0xFF}
+
+
+# --- small helpers ----------------------------------------------------------
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def read_json(path, default=None):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path, obj):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(obj, fh, indent=2)
+    os.replace(tmp, path)  # atomic: the widget reads these while we write
+
+
+def api_key():
+    key = os.environ.get("GOVEE_API_KEY")
+    if key:
+        return key.strip()
+    try:
+        with open(os.path.join(CONFIG, "api-key")) as fh:
+            return fh.read().strip()
+    except OSError:
+        die("No API key. Govee Home app -> Profile -> settings -> Apply for API\n"
+            "Key, then: mkdir -p %s && echo KEY > %s/api-key" % (CONFIG, CONFIG))
+
+
+def local_ip():
+    """Source address for the LAN we're on, so multicast leaves the right NIC
+    rather than a docker bridge — which is exactly how a scan silently finds
+    nothing on a machine with containers."""
+    override = os.environ.get("OMAGOVEE_IFACE_IP")
+    if override:
+        return override
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 53))  # no packet sent, just picks a route
+        return sock.getsockname()[0]
+    finally:
+        sock.close()
+
+
+# --- LAN transport ----------------------------------------------------------
+
+def lan_socket(bind_ip):
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    rx.bind(("0.0.0.0", PORT_RX))
+    rx.setsockopt(
+        socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+        struct.pack("4s4s", socket.inet_aton(MCAST), socket.inet_aton(bind_ip)))
+    rx.settimeout(0.5)
+
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(bind_ip))
+    tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
+    tx.bind((bind_ip, 0))
+    return rx, tx
+
+
+def lan_scan(timeout=5.0, sweep=True):
+    """Discover LAN-enabled devices. Returns {mac: {sku, ip, ...}}."""
+    bind_ip = local_ip()
+    rx, tx = lan_socket(bind_ip)
+    msg = json.dumps(lan_payload("scan", {"account_topic": "reserve"})).encode()
+    targets = [MCAST, bind_ip.rsplit(".", 1)[0] + ".255"]
+    if sweep:
+        # ponytail: 254 unicast packets, because consumer routers drop
+        # multicast far more often than they drop plain UDP. Drop the sweep
+        # if you ever run this on a /16.
+        targets += ["%s.%d" % (bind_ip.rsplit(".", 1)[0], i) for i in range(1, 255)]
+    for target in targets:
+        try:
+            tx.sendto(msg, (target, PORT_REQ))
+        except OSError:
+            pass
+
+    found, end = {}, time.time() + timeout
+    while time.time() < end:
+        try:
+            raw, addr = rx.recvfrom(4096)
+        except socket.timeout:
+            continue
+        try:
+            data = json.loads(raw)["msg"]["data"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if "device" not in data:
+            continue
+        data.setdefault("ip", addr[0])
+        found[data["device"]] = data
+    rx.close()
+    tx.close()
+    return found
+
+
+def lan_send(ip, cmd, data):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(json.dumps(lan_payload(cmd, data)).encode(), (ip, PORT_CMD))
+    finally:
+        sock.close()
+
+
+def lan_state(ip, timeout=1.5):
+    """devStatus round-trip. None if the device doesn't answer in time — the
+    caller must fall back rather than treat silence as 'off'."""
+    bind_ip = local_ip()
+    try:
+        rx, tx = lan_socket(bind_ip)
+    except OSError:
+        return None
+    try:
+        tx.sendto(json.dumps(lan_payload("devStatus", {})).encode(), (ip, PORT_CMD))
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                raw, addr = rx.recvfrom(4096)
+            except socket.timeout:
+                continue
+            if addr[0] != ip:
+                continue
+            try:
+                return json.loads(raw)["msg"]["data"]
+            except (ValueError, KeyError, TypeError):
+                continue
+        return None
+    finally:
+        rx.close()
+        tx.close()
+
+
+# --- cloud transport --------------------------------------------------------
+
+def cloud(path, body=None):
+    req = urllib.request.Request(
+        API + path,
+        data=json.dumps(body).encode() if body is not None else None,
+        headers={"Govee-API-Key": api_key(), "Content-Type": "application/json"},
+        method="POST" if body is not None else "GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        die("Govee API %s: %s" % (exc.code, exc.read().decode()[:200]))
+    except urllib.error.URLError as exc:
+        die("Govee API unreachable: %s" % exc.reason)
+
+
+def cloud_devices(max_age=86400):
+    """Cached device list — the list endpoint allows only 30 req/min/account,
+    and a bar widget must not spend that budget on redraws."""
+    path = os.path.join(CACHE, "devices.json")
+    cached = read_json(path)
+    if cached and time.time() - cached.get("fetched", 0) < max_age:
+        return cached["devices"]
+    devices = cloud("/router/api/v1/user/devices").get("data", [])
+    write_json(path, {"fetched": time.time(), "devices": devices})
+    return devices
+
+
+# --- device resolution ------------------------------------------------------
+
+def devices():
+    """Cloud devices annotated with a LAN ip where scan found one."""
+    lan = read_json(os.path.join(CACHE, "lan.json"), {}) or {}
+    out = []
+    for dev in cloud_devices():
+        entry = {
+            "sku": dev.get("sku"),
+            "mac": dev.get("device"),
+            "name": dev.get("deviceName") or dev.get("sku"),
+            "ip": None,
+        }
+        hit = lan.get(entry["mac"])
+        if hit:
+            entry["ip"] = hit.get("ip")
+        out.append(entry)
+    return out
+
+
+def resolve(name=None):
+    devs = devices()
+    if not devs:
+        die("No devices on the account. Check the API key.")
+    if name is None:
+        name = read_json(os.path.join(CONFIG, "default.json"), {}).get("name")
+    if name is None:
+        if len(devs) == 1:
+            return devs[0]
+        die("Several devices — name one, or set a default:\n  %s"
+            % "\n  ".join(d["name"] for d in devs))
+    matches = [d for d in devs
+               if name.lower() in (d["name"] or "").lower() or name == d["mac"]]
+    if not matches:
+        die("No device matching %r. Known: %s"
+            % (name, ", ".join(d["name"] for d in devs)))
+    return matches[0]
+
+
+# --- actions ----------------------------------------------------------------
+
+def remember(dev, **fields):
+    """Optimistic state file for the bar widget, so the widget never has to
+    make a network call of its own to draw itself."""
+    path = os.path.join(CACHE, "state.json")
+    state = read_json(path, {}) or {}
+    entry = state.setdefault(dev["mac"], {"name": dev["name"]})
+    entry.update(fields)
+    entry["at"] = time.time()
+    write_json(path, state)
+
+
+def apply(dev, kind, value):
+    """kind: power|brightness|color. LAN when we know an ip, cloud otherwise."""
+    lan_cmd = {
+        "power": ("turn", {"value": value}),
+        "brightness": ("brightness", {"value": value}),
+        "color": ("colorwc", {"color": rgb(value), "colorTemInKelvin": 0}),
+    }[kind]
+    cloud_cap = {
+        "power": ("devices.capabilities.on_off", "powerSwitch"),
+        "brightness": ("devices.capabilities.range", "brightness"),
+        "color": ("devices.capabilities.color_setting", "colorRgb"),
+    }[kind]
+
+    if dev["ip"]:
+        lan_send(dev["ip"], *lan_cmd)
+    else:
+        ctype, instance = cloud_cap
+        cloud("/router/api/v1/device/control",
+              cloud_payload(dev["sku"], dev["mac"], ctype, instance, value,
+                            req_id="omagovee-%d" % time.time()))
+    remember(dev, **{kind: value})
+
+
+def power_state(dev):
+    """1/0, or None if nothing will tell us."""
+    if dev["ip"]:
+        data = lan_state(dev["ip"])
+        if data and "onOff" in data:
+            return int(data["onOff"])
+    resp = cloud("/router/api/v1/device/state",
+                 {"requestId": "omagovee", "payload":
+                  {"sku": dev["sku"], "device": dev["mac"]}})
+    for cap in resp.get("payload", {}).get("capabilities", []):
+        if cap.get("instance") == "powerSwitch":
+            return int(cap.get("state", {}).get("value", 0))
+    return None
+
+
+# --- cli --------------------------------------------------------------------
+
+USAGE = __doc__.split("\n\n")[0] + """
+  omarchy-govee scan                 discover LAN-enabled devices
+  omarchy-govee list                 devices on the account (LAN ip if known)
+  omarchy-govee on|off|toggle [dev]
+  omarchy-govee brightness 0-100 [dev]
+  omarchy-govee color HEX|name [dev]   %s
+  omarchy-govee state [dev]
+  omarchy-govee default <dev>        remember which device bare commands hit
+""" % "|".join(sorted(COLORS))
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(USAGE)
+        return 0
+    cmd, args = argv[0], argv[1:]
+
+    if cmd == "scan":
+        found = lan_scan()
+        write_json(os.path.join(CACHE, "lan.json"), found)
+        if not found:
+            print("No LAN-enabled Govee devices answered.\n"
+                  "Enable 'LAN Control' per device in the Govee Home app; models\n"
+                  "without that toggle are cloud-only and still work via `list`.")
+            return 1
+        for mac, dev in sorted(found.items()):
+            print("%-18s %-8s %s" % (dev.get("ip"), dev.get("sku", "?"), mac))
+        return 0
+
+    if cmd == "list":
+        for dev in devices():
+            print("%-24s %-8s %-20s %s"
+                  % (dev["name"], dev["sku"], dev["ip"] or "cloud", dev["mac"]))
+        return 0
+
+    if cmd == "default":
+        if not args:
+            die("usage: omarchy-govee default <device>")
+        dev = resolve(args[0])
+        write_json(os.path.join(CONFIG, "default.json"), {"name": dev["name"]})
+        print("default: %s" % dev["name"])
+        return 0
+
+    if cmd in ("on", "off"):
+        apply(resolve(args[0] if args else None), "power", 1 if cmd == "on" else 0)
+        return 0
+
+    if cmd == "toggle":
+        dev = resolve(args[0] if args else None)
+        current = power_state(dev)
+        if current is None:
+            die("Could not read state of %s" % dev["name"])
+        apply(dev, "power", 0 if current else 1)
+        print("%s: %s" % (dev["name"], "off" if current else "on"))
+        return 0
+
+    if cmd == "brightness":
+        if not args:
+            die("usage: omarchy-govee brightness 0-100 [device]")
+        value = int(args[0])
+        if not 0 <= value <= 100:
+            die("brightness must be 0-100")
+        apply(resolve(args[1] if len(args) > 1 else None), "brightness", value)
+        return 0
+
+    if cmd == "color":
+        if not args:
+            die("usage: omarchy-govee color HEX|name [device]")
+        try:
+            value = parse_color(args[0])
+        except ValueError:
+            die("bad colour %r — use RRGGBB or one of: %s"
+                % (args[0], ", ".join(sorted(COLORS))))
+        apply(resolve(args[1] if len(args) > 1 else None), "color", value)
+        return 0
+
+    if cmd == "state":
+        dev = resolve(args[0] if args else None)
+        current = power_state(dev)
+        print("%s: %s" % (dev["name"],
+                          "unknown" if current is None else ("on" if current else "off")))
+        return 0
+
+    die("unknown command %r\n\n%s" % (cmd, USAGE), 2)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

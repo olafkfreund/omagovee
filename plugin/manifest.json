@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "olafkfreund.govee",
+  "name": "Govee Lights",
+  "version": "1.0.0",
+  "author": "olafkfreund",
+  "license": "MIT",
+  "description": "Toggle the default Govee light and pick brightness or colour from the bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Govee.qml"
+  },
+  "barWidget": {
+    "displayName": "Govee Lights",
+    "description": "Left-click: toggle the default light. Right-click: pick device, brightness, colour.",
+    "category": "Info",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
