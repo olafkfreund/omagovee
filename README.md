@@ -19,7 +19,7 @@ else falls back to the cloud. No account of ours, no broker, no MQTT.
 |---|---|
 | `bin/omarchy-govee` | The whole client — scan, list, on/off/toggle, brightness, colour |
 | `bin/omarchy-cmd-lights` | `gum` picker: device → action → value; for the menu row and the widget |
-| `plugin/` | Omarchy bar widget: left-click toggles, right-click opens the picker |
+| `plugin/` | Omarchy bar widget + dropdown panel: scenes, rooms, per-device toggle/brightness/colour |
 | `test_omagovee.py` | `python3 test_omagovee.py` — payload and colour logic |
 
 Python stdlib only. No `jq`, no `curl`, no pip install — a bar-widget click has
@@ -46,9 +46,47 @@ omarchy-govee default desk  # which device bare commands hit
 omarchy-govee toggle
 omarchy-govee brightness 40
 omarchy-govee color warm
-omarchy-govee color ff8800 "Living room"
 omarchy-govee state
+
+# groups: a device name, room:<name>, or all
+omarchy-govee rooms --auto          # infer rooms from the name prefixes
+omarchy-govee rooms office shelf1 shelf2
+omarchy-govee off room:hall
+omarchy-govee color red all
+
+# scenes live in ~/.config/omagovee/scenes.json and are yours to edit
+omarchy-govee scene                 # list
+omarchy-govee scene meeting         # all lights red at 60%
 ```
+
+### Scenes
+
+`scenes.json` is a list of steps per scene; each step names a target and any of
+`power`, `brightness`, `color`:
+
+```json
+{ "meeting": [ { "target": "room:office", "power": 1, "color": "red", "brightness": 60 } ] }
+```
+
+Power is applied before colour and brightness — setting a colour on a dark lamp
+is invisible otherwise.
+
+Nothing here runs a scene for you. To make "red while in a meeting" automatic,
+hang it off the calendar you already have via `gog`:
+
+```bash
+gog events today --json | jq -e '.[] | select(.now)' >/dev/null \
+  && omarchy-govee scene meeting || omarchy-govee scene evening
+```
+
+in a user timer. A daemon that watches for you is deliberately not built yet.
+
+### Panel
+
+The bar icon left-clicks to open a dropdown: scene buttons, one section per
+room with all-on/all-off, and a row per device with a toggle. Clicking a device
+name expands a brightness slider and colour swatches. Right-clicking the bar
+icon toggles the default device without opening anything.
 
 ## Install (NixOS / Nixarchy)
 
@@ -98,10 +136,17 @@ purpose. BLE only reaches one device at a time, needs a live connection BlueZ
 keeps dropping when idle, and is a reverse-engineered protocol rather than a
 published API. Once a device is on Wi-Fi the LAN path is faster and more
 reliable. Worth revisiting only for a device that can never join Wi-Fi.
-- The widget draws from `~/.cache/omagovee/state.json`, written after each
-  action — an optimistic value, not a live query. Changing a light from the
-  phone will not update the bar until the next command from here. Deliberate:
-  the cloud state endpoint allows 30 req/min/device and a redraw poll would eat
-  that in seconds.
+- The panel and the bar icon both read `omarchy-govee dump`, which fetches all
+  device states concurrently (~1.2s for 15 devices; serially it would be five).
+  It refreshes at startup, when the panel opens, after every action, and once a
+  minute while closed. An earlier design cached state in a file the widget
+  watched with inotify — that broke silently, because the CLI's atomic writes
+  swap the inode out from under the watch, and a second copy of the state is a
+  second thing that can be wrong.
+- **The plugin's QML entry file must be named `Govee.qml`.** Naming it
+  `Panel.qml` or `GoveePanel.qml` makes Quickshell fail the widget with "File
+  name case mismatch". Relatedly, the `Panel` base type from `qs.Ui` resolves
+  only inside the shell's own module path, so a third-party plugin has to build
+  its popup on `BarWidget` + `KeyboardPanel` instead.
 - Device list is cached 24h (`~/.cache/omagovee/devices.json`); delete it after
   adding a lamp.

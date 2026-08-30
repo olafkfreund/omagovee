@@ -15,8 +15,10 @@ Stdlib only on purpose: this runs from a bar widget click, so it must start
 fast and never depend on jq/curl being installed.
 """
 
+import concurrent.futures
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -87,7 +89,7 @@ def write_json(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(obj, fh, indent=2)
-    os.replace(tmp, path)  # atomic: the widget reads these while we write
+    os.replace(tmp, path)  # atomic: readers never see a half-written cache
 
 
 def api_key():
@@ -281,18 +283,79 @@ def resolve(name=None):
     return matches[0]
 
 
+# --- rooms and scenes -------------------------------------------------------
+
+def rooms_path():
+    return os.path.join(CONFIG, "rooms.json")
+
+
+def load_rooms():
+    return read_json(rooms_path(), {}) or {}
+
+
+def auto_rooms(devs):
+    """Group by the leading alphabetic run of the name: shelf1/shelf2 -> shelf,
+    lvrt1..lvrt4 -> lvrt. Wrong sometimes; it is a starting point the user
+    edits, not a guess we act on silently."""
+    groups = {}
+    for dev in devs:
+        match = re.match(r"[a-zA-Z]+", dev["name"] or "")
+        if match:
+            groups.setdefault(match.group(0).lower(), []).append(dev["name"])
+    return {k: v for k, v in groups.items() if len(v) > 1}
+
+
+def scenes_path():
+    return os.path.join(CONFIG, "scenes.json")
+
+
+DEFAULT_SCENES = {
+    "meeting": [{"target": "all", "power": 1, "color": "red", "brightness": 60}],
+    "focus":   [{"target": "all", "power": 1, "color": "cool", "brightness": 100}],
+    "evening": [{"target": "all", "power": 1, "color": "warm", "brightness": 35}],
+    "off":     [{"target": "all", "power": 0}],
+}
+
+
+def load_scenes():
+    scenes = read_json(scenes_path())
+    if scenes is None:
+        write_json(scenes_path(), DEFAULT_SCENES)
+        return dict(DEFAULT_SCENES)
+    return scenes
+
+
+def resolve_many(target):
+    """A device name, `room:<name>`, or `all` -> list of devices."""
+    devs = devices()
+    if target == "all":
+        return devs
+    if target.startswith("room:"):
+        names = load_rooms().get(target[5:], [])
+        if not names:
+            die("No room %r. Known: %s" % (target[5:], ", ".join(load_rooms()) or "none"))
+        return [d for d in devs if d["name"] in names]
+    return [resolve(target)]
+
+
+def run_scene(name):
+    scenes = load_scenes()
+    if name not in scenes:
+        die("No scene %r. Known: %s" % (name, ", ".join(sorted(scenes))))
+    for step in scenes[name]:
+        for dev in resolve_many(step.get("target", "all")):
+            # Power first: colour and brightness on a dark lamp are invisible.
+            if "power" in step:
+                apply(dev, "power", int(step["power"]))
+            if step.get("power") == 0:
+                continue
+            if "brightness" in step:
+                apply(dev, "brightness", int(step["brightness"]))
+            if "color" in step:
+                apply(dev, "color", parse_color(str(step["color"])))
+
+
 # --- actions ----------------------------------------------------------------
-
-def remember(dev, **fields):
-    """Optimistic state file for the bar widget, so the widget never has to
-    make a network call of its own to draw itself."""
-    path = os.path.join(CACHE, "state.json")
-    state = read_json(path, {}) or {}
-    entry = state.setdefault(dev["mac"], {"name": dev["name"]})
-    entry.update(fields)
-    entry["at"] = time.time()
-    write_json(path, state)
-
 
 def apply(dev, kind, value):
     """kind: power|brightness|color. LAN when we know an ip, cloud otherwise."""
@@ -330,7 +393,6 @@ def apply(dev, kind, value):
         cloud("/router/api/v1/device/control",
               cloud_payload(dev["sku"], dev["mac"], ctype, instance, value,
                             req_id="omagovee-%d" % time.time()))
-    remember(dev, **{kind: value})
 
 
 def power_state(dev):
@@ -352,6 +414,33 @@ def power_state(dev):
     return out
 
 
+def dump():
+    """Everything the panel draws, as one JSON document.
+
+    States are fetched concurrently: serially this is 15 cloud round-trips and
+    a panel that takes five seconds to open."""
+    devs = devices()
+
+    def annotate(dev):
+        entry = dict(dev)
+        try:
+            state = power_state(dev)
+            entry.update(online=state["online"], power=state["power"])
+        except SystemExit:
+            entry.update(online=False, power=None)  # die() inside a worker
+        return entry
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        annotated = list(pool.map(annotate, devs))
+
+    return {
+        "devices": annotated,
+        "rooms": load_rooms(),
+        "scenes": sorted(load_scenes()),
+        "default": read_json(os.path.join(CONFIG, "default.json"), {}).get("name"),
+    }
+
+
 # --- cli --------------------------------------------------------------------
 
 USAGE = __doc__.split("\n\n")[0] + """
@@ -362,6 +451,11 @@ USAGE = __doc__.split("\n\n")[0] + """
   omarchy-govee color HEX|name [dev]   %s
   omarchy-govee state [dev]
   omarchy-govee default <dev>        remember which device bare commands hit
+  omarchy-govee rooms [--auto | <room> <dev>...]
+  omarchy-govee scene [name]         run a scene, or list them
+  omarchy-govee dump                 JSON of everything, for the panel
+
+  Any [dev] may be a name, `room:<name>` or `all`.
 """ % "|".join(sorted(COLORS))
 
 
@@ -398,7 +492,12 @@ def main(argv):
         return 0
 
     if cmd in ("on", "off"):
-        apply(resolve(args[0] if args else None), "power", 1 if cmd == "on" else 0)
+        value = 1 if cmd == "on" else 0
+        if args and (args[0] == "all" or args[0].startswith("room:")):
+            for dev in resolve_many(args[0]):
+                apply(dev, "power", value)
+            return 0
+        apply(resolve(args[0] if args else None), "power", value)
         return 0
 
     if cmd == "toggle":
@@ -418,7 +517,8 @@ def main(argv):
         value = int(args[0])
         if not 0 <= value <= 100:
             die("brightness must be 0-100")
-        apply(resolve(args[1] if len(args) > 1 else None), "brightness", value)
+        for dev in (resolve_many(args[1]) if len(args) > 1 else [resolve(None)]):
+            apply(dev, "brightness", value)
         return 0
 
     if cmd == "color":
@@ -429,7 +529,35 @@ def main(argv):
         except ValueError:
             die("bad colour %r — use RRGGBB or one of: %s"
                 % (args[0], ", ".join(sorted(COLORS))))
-        apply(resolve(args[1] if len(args) > 1 else None), "color", value)
+        for dev in (resolve_many(args[1]) if len(args) > 1 else [resolve(None)]):
+            apply(dev, "color", value)
+        return 0
+
+    if cmd == "dump":
+        print(json.dumps(dump(), indent=2))
+        return 0
+
+    if cmd == "scene":
+        if not args:
+            print("\n".join(sorted(load_scenes())))
+            return 0
+        run_scene(args[0])
+        print("scene: %s" % args[0])
+        return 0
+
+    if cmd == "rooms":
+        current = load_rooms()
+        if args and args[0] == "--auto":
+            current = auto_rooms(devices())
+            write_json(rooms_path(), current)
+        elif args:
+            room, members = args[0], args[1:]
+            if not members:
+                die("usage: omarchy-govee rooms <room> <device>...")
+            current[room] = members
+            write_json(rooms_path(), current)
+        for room, members in sorted(current.items()):
+            print("%-12s %s" % (room, " ".join(members)))
         return 0
 
     if cmd == "state":
