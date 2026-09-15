@@ -151,7 +151,15 @@ BarWidget {
 
   Process {
     id: actionProc
-    onExited: {
+    stderr: StdioCollector { id: actionErr; waitForEnd: true }
+    onExited: function (code) {
+      // Read before pump(): the next queued command reuses this Process.
+      // Without this a refused command (a reserved room name, an offline
+      // light) just snaps back with no reason given.
+      var err = actionErr.text.trim()
+      if (code !== 0)
+        Quickshell.execDetached(["notify-send", "-u", "critical", "-a", "Omarchy",
+                                 "Govee failed", err || "omarchy-govee failed"])
       root.busyName = ""
       root.pump()
       // Re-read rather than assume: a command can fail (offline device, a
@@ -271,396 +279,422 @@ BarWidget {
           Repeater {
             model: root.roomList
 
-            delegate: Column {
+            delegate: Item {
               id: roomItem
               required property var modelData
               readonly property var room: modelData
               readonly property bool editing: root.expandedName === "room:" + room.name
               width: column.width
-              spacing: Style.space(4)
+              implicitHeight: roomCol.implicitHeight
               z: root.dragRoom === room.name ? 100 : 0
 
-              Item {
-                width: parent.width
-                // Grows during a drag: a one-line header is a miserable thing
-                // to aim at.
-                implicitHeight: roomHeader.implicitHeight
-                  + (root.dragName !== "" ? Style.space(14) : 0)
-
-                DropArea {
-                  id: roomDrop
-                  anchors.fill: parent
-                  keys: ["govee-device"]
-                  onDropped: function (drop) {
-                    // "other" is not a room, it is the devices in none of them.
-                    var target = roomItem.room.name === "other"
-                      ? "none" : roomItem.room.name
-                    console.log("govee drop", drop.source.devName,
-                                "->", target)
-                    if (drop.source.devRoom !== roomItem.room.name)
-                      root.act(["rooms", "assign", target, drop.source.devName], "")
-                    drop.accept()
-                  }
-                }
-
-                Rectangle {
-                  anchors.fill: parent
-                  z: -1
-                  visible: roomDrop.containsDrag
-                  radius: Style.cornerRadius
-                  color: "transparent"
-                  border.width: 1
-                  border.color: Style.selectedFillFor(root.bar.foreground, Color.accent)
-                }
-
-                PanelSectionHeader {
-                  id: roomHeader
-                  anchors.left: parent.left
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: roomItem.room.name
-                  foreground: root.bar ? root.bar.foreground : Color.foreground
-
-                  MouseArea {
-                    anchors.fill: parent
-                    onClicked: root.expandedName =
-                      roomItem.editing ? "" : "room:" + roomItem.room.name
-                  }
-                }
-
-                Row {
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.space(4)
-
-                  PanelActionButton {
-                    iconText: "\uf011"
-                    tooltipText: "All off"
-                    foreground: root.bar ? root.bar.foreground : Color.foreground
-                    onClicked: root.act(["off", "room:" + roomItem.room.name], "")
-                  }
-                  PanelActionButton {
-                    iconText: "\uf0eb"
-                    tooltipText: "All on"
-                    foreground: root.bar ? root.bar.foreground : Color.foreground
-                    onClicked: root.act(["on", "room:" + roomItem.room.name], "")
-                  }
-                }
-              }
-
-              // ----- whole-room controls, shown by clicking the room name -----
               Column {
+                id: roomCol
                 width: parent.width
-                spacing: Style.space(6)
-                visible: roomItem.editing
-                height: visible ? implicitHeight : 0
+                spacing: Style.space(4)
 
-                TextField {
+                Item {
                   width: parent.width
-                  text: roomItem.room.name
-                  placeholderText: "Room name"
-                  verticalPadding: Style.space(3)
-                  foreground: root.bar ? root.bar.foreground : Color.foreground
-                  enabled: roomItem.room.name !== "other"
-                  onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
-                  onAccepted: {
-                    if (text && text !== roomItem.room.name) {
-                      root.act(["rooms", "rename", roomItem.room.name, text], "")
-                      root.expandedName = ""
+                  // Grows during a drag: a one-line header is a miserable thing
+                  // to aim at.
+                  implicitHeight: roomHeader.implicitHeight
+                    + (root.dragName !== "" ? Style.space(14) : 0)
+
+                  PanelSectionHeader {
+                    id: roomHeader
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: roomItem.room.name
+                    foreground: root.bar ? root.bar.foreground : Color.foreground
+
+                    MouseArea {
+                      anchors.fill: parent
+                      onClicked: root.expandedName =
+                        roomItem.editing ? "" : "room:" + roomItem.room.name
                     }
-                    focus = false
                   }
-                }
 
-                PanelSlider {
-                  width: parent.width
-                  bar: root.bar
-                  minimum: 1
-                  maximum: 100
-                  step: 1
-                  integer: true
-                  value: 50
-                  onReleased: function (v) {
-                    root.act(["brightness", String(Math.round(v)),
-                              "room:" + roomItem.room.name], "")
-                  }
-                }
+                  Row {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    spacing: Style.space(4)
 
-                Flow {
-                  width: parent.width
-                  spacing: Style.space(5)
-
-                  Repeater {
-                    model: root.swatches
-                    delegate: Rectangle {
-                      required property var modelData
-                      width: Style.space(20)
-                      height: Style.space(20)
-                      radius: Style.cornerRadius > 0 ? width / 2 : 0
-                      color: modelData.rgb
-                      border.width: roomSwatch.containsMouse ? 2 : 1
-                      border.color: root.bar ? root.bar.foreground : Color.foreground
-
-                      MouseArea {
-                        id: roomSwatch
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        onClicked: root.act(["color", parent.modelData.name,
-                                             "room:" + roomItem.room.name], "")
-                      }
+                    PanelActionButton {
+                      iconText: "\uf011"
+                      tooltipText: "All off"
+                      foreground: root.bar ? root.bar.foreground : Color.foreground
+                      onClicked: root.act(["off", "room:" + roomItem.room.name], "")
+                    }
+                    PanelActionButton {
+                      iconText: "\uf0eb"
+                      tooltipText: "All on"
+                      foreground: root.bar ? root.bar.foreground : Color.foreground
+                      onClicked: root.act(["on", "room:" + roomItem.room.name], "")
                     }
                   }
                 }
 
-                PanelSeparator { width: parent.width }
-              }
+                // ----- whole-room controls, shown by clicking the room name -----
+                Column {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  visible: roomItem.editing
+                  height: visible ? implicitHeight : 0
 
-              Repeater {
-                model: roomItem.room.members
-
-                delegate: Column {
-                  id: devItem
-                  required property var modelData
-                  readonly property var dev: modelData
-                  readonly property bool isExpanded: root.expandedName === dev.name
-                  width: column.width
-                  spacing: Style.space(4)
-
-                  // ----- device row -----
-                  Item {
+                  TextField {
                     width: parent.width
-                    implicitHeight: Math.max(nameText.implicitHeight, sw.implicitHeight)
-                    z: root.dragName === devItem.dev.name ? 100 : 0
-
-                    // Only `content` moves while dragging. The row keeps its
-                    // slot in the Column, so the list does not reflow under
-                    // the cursor mid-drag and the drop lands where you aimed.
-                    Item {
-                      id: content
-                      width: parent.width
-                      height: parent.height
-                      opacity: Drag.active ? 0.6 : 1.0
-
-                      // Read back off `drop.source` by the room that catches it.
-                      property string devName: devItem.dev.name
-                      property string devRoom: roomItem.room.name
-
-                      Drag.active: dragArea.drag.active
-                      Drag.source: content
-                      Drag.keys: ["govee-device"]
-                      Drag.hotSpot.x: width / 2
-                      Drag.hotSpot.y: height / 2
-
-                      // Dragging and scrolling are the same gesture, so they
-                      // get different territory: this handle column drags, the
-                      // rest of the row still flicks the list.
-                      //
-                      // preventStealing is the load-bearing line. A Flickable
-                      // filters its children's mouse events and takes the grab
-                      // the moment the pointer passes its own threshold, so
-                      // without it the drag never starts and the panel scrolls
-                      // instead — which is exactly what it did.
-                      MouseArea {
-                        id: dragArea
-                        anchors.left: parent.left
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        width: Style.space(24)
-                        hoverEnabled: true
-                        preventStealing: true
-                        cursorShape: drag.active ? Qt.ClosedHandCursor
-                                                 : Qt.OpenHandCursor
-                        drag.target: content
-                        drag.smoothed: false
-                        drag.threshold: 4
-
-                        // Announced once the drag is real, not on press: a
-                        // stray click should not make every room heading jump.
-                        onPositionChanged: {
-                          if (drag.active && root.dragName === "") {
-                            root.dragName = devItem.dev.name
-                            root.dragRoom = roomItem.room.name
-                            // Left in deliberately: this gesture cannot be
-                            // tested from a shell, so the journal is the only
-                            // evidence of where it broke.
-                            console.log("govee drag start", root.dragName,
-                                        "from", root.dragRoom)
-                          }
-                        }
-                        onReleased: {
-                          if (drag.active) content.Drag.drop()
-                          content.x = 0
-                          content.y = 0
-                          root.dragName = ""
-                          root.dragRoom = ""
-                        }
-                        onCanceled: {
-                          content.x = 0
-                          content.y = 0
-                          root.dragName = ""
-                          root.dragRoom = ""
-                        }
-
-                        Text {
-                          anchors.centerIn: parent
-                          text: "\u2630"
-                          color: root.bar ? root.bar.foreground : Color.foreground
-                          opacity: dragArea.containsMouse || dragArea.drag.active
-                            ? 0.9 : 0.3
-                          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                          font.pixelSize: Style.font.caption
-                        }
+                    text: roomItem.room.name
+                    placeholderText: "Room name"
+                    verticalPadding: Style.space(3)
+                    foreground: root.bar ? root.bar.foreground : Color.foreground
+                    enabled: roomItem.room.name !== "other"
+                    onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
+                    onAccepted: {
+                      if (text && text !== roomItem.room.name) {
+                        root.act(["rooms", "rename", roomItem.room.name, text], "")
+                        root.expandedName = ""
                       }
+                      focus = false
+                    }
+                  }
 
-                      Text {
-                        id: typeIcon
-                        anchors.left: dragArea.right
-                        anchors.leftMargin: Style.space(6)
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: root.kindIcon(devItem.dev.kind)
-                        color: root.bar ? root.bar.foreground : Color.foreground
-                        opacity: devItem.dev.online ? 0.85 : 0.35
-                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                        font.pixelSize: Style.font.caption
-                      }
+                  PanelSlider {
+                    width: parent.width
+                    bar: root.bar
+                    minimum: 1
+                    maximum: 100
+                    step: 1
+                    integer: true
+                    value: 50
+                    onReleased: function (v) {
+                      root.act(["brightness", String(Math.round(v)),
+                                "room:" + roomItem.room.name], "")
+                    }
+                  }
 
-                      Text {
-                        id: nameText
-                        anchors.left: typeIcon.right
-                        anchors.leftMargin: Style.space(6)
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: (devItem.dev.label || devItem.dev.name)
-                          + (devItem.dev.online ? "" : "  (offline)")
-                          + (devItem.dev.ip ? "  ·  lan" : "")
-                        color: root.bar ? root.bar.foreground : Color.foreground
-                        opacity: devItem.dev.online ? 1.0 : 0.45
-                        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                        font.pixelSize: Style.font.caption
+                  Flow {
+                    width: parent.width
+                    spacing: Style.space(5)
+
+                    Repeater {
+                      model: root.swatches
+                      delegate: Rectangle {
+                        required property var modelData
+                        width: Style.space(20)
+                        height: Style.space(20)
+                        radius: Style.cornerRadius > 0 ? width / 2 : 0
+                        color: modelData.rgb
+                        border.width: roomSwatch.containsMouse ? 2 : 1
+                        border.color: root.bar ? root.bar.foreground : Color.foreground
 
                         MouseArea {
+                          id: roomSwatch
                           anchors.fill: parent
-                          onClicked: root.expandedName =
-                            devItem.isExpanded ? "" : devItem.dev.name
+                          hoverEnabled: true
+                          onClicked: root.act(["color", parent.modelData.name,
+                                               "room:" + roomItem.room.name], "")
                         }
-                      }
-
-                      ToggleSwitch {
-                        id: sw
-                        anchors.right: parent.right
-                        anchors.verticalCenter: parent.verticalCenter
-                        checked: devItem.dev.power === 1
-                        interactive: devItem.dev.online
-                        busy: root.busyName === devItem.dev.name
-                        foreground: root.bar ? root.bar.foreground : Color.foreground
-                        onToggled: root.act([checked ? "off" : "on", devItem.dev.name],
-                                            devItem.dev.name)
                       }
                     }
                   }
 
-                  // ----- expanded controls -----
-                  Column {
-                    width: parent.width
-                    spacing: Style.space(6)
-                    visible: devItem.isExpanded
-                    height: visible ? implicitHeight : 0
+                  PanelSeparator { width: parent.width }
+                }
 
-                    TextField {
+                Repeater {
+                  model: roomItem.room.members
+
+                  delegate: Column {
+                    id: devItem
+                    required property var modelData
+                    readonly property var dev: modelData
+                    readonly property bool isExpanded: root.expandedName === dev.name
+                    width: column.width
+                    spacing: Style.space(4)
+
+                    // ----- device row -----
+                    Item {
                       width: parent.width
-                      text: devItem.dev.label
-                      // The device keeps the name Govee knows it by; this only
-                      // changes what the panel calls it. Empty clears it.
-                      placeholderText: "Friendly name for " + devItem.dev.name
-                      verticalPadding: Style.space(3)
-                      foreground: root.bar ? root.bar.foreground : Color.foreground
-                      onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
-                      onAccepted: {
-                        root.act(["label", devItem.dev.name].concat(
-                          text ? [text] : []), "")
-                        focus = false
-                      }
-                    }
+                      implicitHeight: Math.max(nameText.implicitHeight, sw.implicitHeight)
+                      z: root.dragName === devItem.dev.name ? 100 : 0
 
-                    Flow {
-                      width: parent.width
-                      spacing: Style.space(5)
+                      // Only `content` moves while dragging. The row keeps its
+                      // slot in the Column, so the list does not reflow under
+                      // the cursor mid-drag and the drop lands where you aimed.
+                      Item {
+                        id: content
+                        width: parent.width
+                        height: parent.height
+                        opacity: Drag.active ? 0.6 : 1.0
 
-                      Repeater {
-                        model: root.roomNames.concat(["none"])
-                        delegate: Rectangle {
-                          required property string modelData
-                          readonly property bool current:
-                            modelData === roomItem.room.name
-                          radius: Style.cornerRadius
-                          color: current || chipMouse.containsMouse
-                            ? Style.selectedFillFor(root.bar.foreground, Color.accent)
-                            : "transparent"
-                          border.width: 1
-                          border.color: Style.selectedFillFor(root.bar.foreground,
-                                                              Color.accent)
-                          implicitWidth: chipLabel.implicitWidth + Style.space(12)
-                          implicitHeight: chipLabel.implicitHeight + Style.space(6)
+                        // Read back off `drop.source` by the room that catches it.
+                        property string devName: devItem.dev.name
+                        property string devRoom: roomItem.room.name
+
+                        Drag.active: dragArea.drag.active
+                        Drag.source: content
+                        Drag.keys: ["govee-device"]
+                        Drag.hotSpot.x: width / 2
+                        Drag.hotSpot.y: height / 2
+
+                        // Dragging and scrolling are the same gesture, so they
+                        // get different territory: this handle column drags, the
+                        // rest of the row still flicks the list.
+                        //
+                        // preventStealing is the load-bearing line. A Flickable
+                        // filters its children's mouse events and takes the grab
+                        // the moment the pointer passes its own threshold, so
+                        // without it the drag never starts and the panel scrolls
+                        // instead — which is exactly what it did.
+                        MouseArea {
+                          id: dragArea
+                          anchors.left: parent.left
+                          anchors.top: parent.top
+                          anchors.bottom: parent.bottom
+                          width: Style.space(24)
+                          hoverEnabled: true
+                          preventStealing: true
+                          cursorShape: drag.active ? Qt.ClosedHandCursor
+                                                   : Qt.OpenHandCursor
+                          drag.target: content
+                          drag.smoothed: false
+                          drag.threshold: 4
+
+                          // Announced once the drag is real, not on press: a
+                          // stray click should not make every room heading jump.
+                          onPositionChanged: {
+                            if (drag.active && root.dragName === "") {
+                              root.dragName = devItem.dev.name
+                              root.dragRoom = roomItem.room.name
+                              // Left in deliberately: this gesture cannot be
+                              // tested from a shell, so the journal is the only
+                              // evidence of where it broke.
+                              console.log("govee drag start", root.dragName,
+                                          "from", root.dragRoom)
+                            }
+                          }
+                          onReleased: {
+                            if (drag.active) content.Drag.drop()
+                            content.x = 0
+                            content.y = 0
+                            root.dragName = ""
+                            root.dragRoom = ""
+                          }
+                          onCanceled: {
+                            content.x = 0
+                            content.y = 0
+                            root.dragName = ""
+                            root.dragRoom = ""
+                          }
 
                           Text {
-                            id: chipLabel
                             anchors.centerIn: parent
-                            text: parent.modelData
+                            text: "\u2630"
                             color: root.bar ? root.bar.foreground : Color.foreground
+                            opacity: dragArea.containsMouse || dragArea.drag.active
+                              ? 0.9 : 0.3
                             font.family: root.bar ? root.bar.fontFamily : Style.font.family
                             font.pixelSize: Style.font.caption
                           }
+                        }
+
+                        Text {
+                          id: typeIcon
+                          anchors.left: dragArea.right
+                          anchors.leftMargin: Style.space(6)
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: root.kindIcon(devItem.dev.kind)
+                          color: root.bar ? root.bar.foreground : Color.foreground
+                          opacity: devItem.dev.online ? 0.85 : 0.35
+                          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                          font.pixelSize: Style.font.caption
+                        }
+
+                        Text {
+                          id: nameText
+                          anchors.left: typeIcon.right
+                          anchors.leftMargin: Style.space(6)
+                          anchors.verticalCenter: parent.verticalCenter
+                          text: (devItem.dev.label || devItem.dev.name)
+                            + (devItem.dev.online ? "" : "  (offline)")
+                            + (devItem.dev.ip ? "  ·  lan" : "")
+                          color: root.bar ? root.bar.foreground : Color.foreground
+                          opacity: devItem.dev.online ? 1.0 : 0.45
+                          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                          font.pixelSize: Style.font.caption
 
                           MouseArea {
-                            id: chipMouse
                             anchors.fill: parent
-                            hoverEnabled: true
-                            onClicked: root.act(["rooms", "assign",
-                                                 parent.modelData, devItem.dev.name], "")
+                            onClicked: root.expandedName =
+                              devItem.isExpanded ? "" : devItem.dev.name
                           }
+                        }
+
+                        ToggleSwitch {
+                          id: sw
+                          anchors.right: parent.right
+                          anchors.verticalCenter: parent.verticalCenter
+                          checked: devItem.dev.power === 1
+                          interactive: devItem.dev.online
+                          busy: root.busyName === devItem.dev.name
+                          foreground: root.bar ? root.bar.foreground : Color.foreground
+                          onToggled: root.act([checked ? "off" : "on", devItem.dev.name],
+                                              devItem.dev.name)
                         }
                       }
                     }
 
-                    PanelSlider {
+                    // ----- expanded controls -----
+                    Column {
                       width: parent.width
-                      bar: root.bar
-                      minimum: 1
-                      maximum: 100
-                      step: 1
-                      integer: true
-                      value: 50
-                      onReleased: function (v) {
-                        root.act(["brightness", String(Math.round(v)), devItem.dev.name],
-                                 devItem.dev.name)
+                      spacing: Style.space(6)
+                      visible: devItem.isExpanded
+                      height: visible ? implicitHeight : 0
+
+                      TextField {
+                        width: parent.width
+                        text: devItem.dev.label
+                        // The device keeps the name Govee knows it by; this only
+                        // changes what the panel calls it. Empty clears it.
+                        placeholderText: "Friendly name for " + devItem.dev.name
+                        verticalPadding: Style.space(3)
+                        foreground: root.bar ? root.bar.foreground : Color.foreground
+                        onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
+                        onAccepted: {
+                          root.act(["label", devItem.dev.name].concat(
+                            text ? [text] : []), "")
+                          focus = false
+                        }
                       }
-                    }
 
-                    Flow {
-                      width: parent.width
-                      spacing: Style.space(5)
+                      Flow {
+                        width: parent.width
+                        spacing: Style.space(5)
 
-                      Repeater {
-                        model: root.swatches
-                        delegate: Rectangle {
-                          required property var modelData
-                          width: Style.space(20)
-                          height: Style.space(20)
-                          radius: Style.cornerRadius > 0 ? width / 2 : 0
-                          color: modelData.rgb
-                          border.width: swatchMouse.containsMouse ? 2 : 1
-                          border.color: root.bar ? root.bar.foreground : Color.foreground
+                        Repeater {
+                          model: root.roomNames.concat(["none"])
+                          delegate: Rectangle {
+                            required property string modelData
+                            readonly property bool current:
+                              modelData === roomItem.room.name
+                            radius: Style.cornerRadius
+                            color: current || chipMouse.containsMouse
+                              ? Style.selectedFillFor(root.bar.foreground, Color.accent)
+                              : "transparent"
+                            border.width: 1
+                            border.color: Style.selectedFillFor(root.bar.foreground,
+                                                                Color.accent)
+                            implicitWidth: chipLabel.implicitWidth + Style.space(12)
+                            implicitHeight: chipLabel.implicitHeight + Style.space(6)
 
-                          MouseArea {
-                            id: swatchMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            onClicked: root.act(["color", parent.modelData.name,
-                                                 devItem.dev.name], devItem.dev.name)
+                            Text {
+                              id: chipLabel
+                              anchors.centerIn: parent
+                              text: parent.modelData
+                              color: root.bar ? root.bar.foreground : Color.foreground
+                              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                              font.pixelSize: Style.font.caption
+                            }
+
+                            MouseArea {
+                              id: chipMouse
+                              anchors.fill: parent
+                              hoverEnabled: true
+                              onClicked: root.act(["rooms", "assign",
+                                                   parent.modelData, devItem.dev.name], "")
+                            }
+                          }
+                        }
+                      }
+
+                      // A room is born with its first light: there are no empty
+                      // rooms, so creating one means naming it while putting a
+                      // light in it. The CLI refuses reserved names.
+                      TextField {
+                        width: parent.width
+                        placeholderText: "New room…"
+                        verticalPadding: Style.space(3)
+                        foreground: root.bar ? root.bar.foreground : Color.foreground
+                        onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
+                        onAccepted: {
+                          var name = text.trim()
+                          if (name)
+                            root.act(["rooms", "assign", name, devItem.dev.name], "")
+                          text = ""
+                          focus = false
+                        }
+                      }
+
+                      PanelSlider {
+                        width: parent.width
+                        bar: root.bar
+                        minimum: 1
+                        maximum: 100
+                        step: 1
+                        integer: true
+                        value: 50
+                        onReleased: function (v) {
+                          root.act(["brightness", String(Math.round(v)), devItem.dev.name],
+                                   devItem.dev.name)
+                        }
+                      }
+
+                      Flow {
+                        width: parent.width
+                        spacing: Style.space(5)
+
+                        Repeater {
+                          model: root.swatches
+                          delegate: Rectangle {
+                            required property var modelData
+                            width: Style.space(20)
+                            height: Style.space(20)
+                            radius: Style.cornerRadius > 0 ? width / 2 : 0
+                            color: modelData.rgb
+                            border.width: swatchMouse.containsMouse ? 2 : 1
+                            border.color: root.bar ? root.bar.foreground : Color.foreground
+
+                            MouseArea {
+                              id: swatchMouse
+                              anchors.fill: parent
+                              hoverEnabled: true
+                              onClicked: root.act(["color", parent.modelData.name,
+                                                   devItem.dev.name], devItem.dev.name)
+                            }
                           }
                         }
                       }
                     }
                   }
                 }
+              }
+
+              // The whole room takes a drop, not just its one-line heading.
+              // Outside the Column because a Column refuses anchored children.
+              DropArea {
+                id: roomDrop
+                anchors.fill: parent
+                keys: ["govee-device"]
+                onDropped: function (drop) {
+                  // "other" is not a room, it is the devices in none of them.
+                  var target = roomItem.room.name === "other"
+                    ? "none" : roomItem.room.name
+                  console.log("govee drop", drop.source.devName,
+                              "->", target)
+                  if (drop.source.devRoom !== roomItem.room.name)
+                    root.act(["rooms", "assign", target, drop.source.devName], "")
+                  drop.accept()
+                }
+              }
+
+              Rectangle {
+                anchors.fill: parent
+                z: -1
+                visible: roomDrop.containsDrag
+                radius: Style.cornerRadius
+                color: "transparent"
+                border.width: 1
+                border.color: Style.selectedFillFor(root.bar.foreground, Color.accent)
               }
             }
           }
