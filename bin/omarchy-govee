@@ -16,6 +16,10 @@ fast and never depend on jq/curl being installed.
 """
 
 import concurrent.futures
+import fcntl
+import functools
+import tempfile
+import threading
 import json
 import os
 import re
@@ -57,11 +61,13 @@ def lan_payload(cmd, data):
 
 def parse_color(spec):
     """'ff8800', '#ff8800' or a name -> 24-bit int. Raises ValueError."""
+    if not isinstance(spec, str):
+        raise ValueError("colour must be a name or RRGGBB")
     if spec.lower() in COLORS:
         return COLORS[spec.lower()]
+    if not re.fullmatch(r"#?[0-9a-fA-F]{6}", spec):
+        raise ValueError("colour must be RRGGBB or #RRGGBB")
     value = int(spec.lstrip("#"), 16)
-    if not 0 <= value <= 0xFFFFFF:
-        raise ValueError("colour out of range: %s" % spec)
     return value
 
 
@@ -72,24 +78,79 @@ def rgb(value):
 # --- small helpers ----------------------------------------------------------
 
 def die(msg, code=1):
-    print(msg, file=sys.stderr)
-    sys.exit(code)
+    raise GoveeError(msg, code)
+
+
+class GoveeError(Exception):
+    def __init__(self, message, code=1):
+        super().__init__(message)
+        self.code = code
+
+
+_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def locked(path_fn):
+    """Serialize threads and processes; nested operations reuse the outer lock."""
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            path = path_fn()
+            with _LOCKS_GUARD:
+                lock, local = _LOCKS.setdefault(path, (threading.RLock(), threading.local()))
+            with lock:
+                if getattr(local, "held", False):
+                    return fn(*args, **kwargs)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "a") as fh:
+                    fcntl.flock(fh, fcntl.LOCK_EX)
+                    local.held = True
+                    try:
+                        return fn(*args, **kwargs)
+                    finally:
+                        local.held = False
+        return wrapped
+    return decorate
+
+
+# ponytail: one LAN exchange at a time; use a shared receiver if latency matters.
+def lan_lock_path():
+    return os.path.join(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir()),
+                        "omagovee-%s" % os.getuid(), "lan.lock")
+
+
+def config_lock_path():
+    return os.path.join(CONFIG, ".lock")
 
 
 def read_json(path, default=None):
     try:
         with open(path) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
+            value = json.load(fh)
+    except FileNotFoundError:
         return default
+    except (OSError, ValueError) as exc:
+        die("Cannot read %s: %s" % (path, exc))
+    if not isinstance(value, dict):
+        die("Expected a JSON object in %s" % path)
+    return value
 
 
 def write_json(path, obj):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(obj, fh, indent=2)
-    os.replace(tmp, path)  # atomic: readers never see a half-written cache
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=os.path.dirname(path),
+                                         delete=False) as fh:
+            tmp = fh.name
+            json.dump(obj, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def api_key():
@@ -123,55 +184,65 @@ def local_ip():
 
 def lan_socket(bind_ip):
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    rx.bind(("0.0.0.0", PORT_RX))
-    rx.setsockopt(
-        socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
-        struct.pack("4s4s", socket.inet_aton(MCAST), socket.inet_aton(bind_ip)))
-    rx.settimeout(0.5)
+    tx = None
+    try:
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        rx.bind(("0.0.0.0", PORT_RX))
+        rx.setsockopt(
+            socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP,
+            struct.pack("4s4s", socket.inet_aton(MCAST), socket.inet_aton(bind_ip)))
+        rx.settimeout(0.5)
 
-    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(bind_ip))
-    tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
-    tx.bind((bind_ip, 0))
-    return rx, tx
+        tx.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(bind_ip))
+        tx.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
+        tx.bind((bind_ip, 0))
+        return rx, tx
+    except BaseException:
+        rx.close()
+        if tx is not None:
+            tx.close()
+        raise
 
 
+@locked(lan_lock_path)
 def lan_scan(timeout=5.0, sweep=True):
     """Discover LAN-enabled devices. Returns {mac: {sku, ip, ...}}."""
     bind_ip = local_ip()
     rx, tx = lan_socket(bind_ip)
-    msg = json.dumps(lan_payload("scan", {"account_topic": "reserve"})).encode()
-    targets = [MCAST, bind_ip.rsplit(".", 1)[0] + ".255"]
-    if sweep:
-        # ponytail: 254 unicast packets, because consumer routers drop
-        # multicast far more often than they drop plain UDP. Drop the sweep
-        # if you ever run this on a /16.
-        targets += ["%s.%d" % (bind_ip.rsplit(".", 1)[0], i) for i in range(1, 255)]
-    for target in targets:
-        try:
-            tx.sendto(msg, (target, PORT_REQ))
-        except OSError:
-            pass
+    try:
+        msg = json.dumps(lan_payload("scan", {"account_topic": "reserve"})).encode()
+        targets = [MCAST, bind_ip.rsplit(".", 1)[0] + ".255"]
+        if sweep:
+            # ponytail: 254 unicast packets, because consumer routers drop
+            # multicast far more often than they drop plain UDP. Drop the sweep
+            # if you ever run this on a /16.
+            targets += ["%s.%d" % (bind_ip.rsplit(".", 1)[0], i) for i in range(1, 255)]
+        for target in targets:
+            try:
+                tx.sendto(msg, (target, PORT_REQ))
+            except OSError:
+                pass
 
-    found, end = {}, time.time() + timeout
-    while time.time() < end:
-        try:
-            raw, addr = rx.recvfrom(4096)
-        except socket.timeout:
-            continue
-        try:
-            data = json.loads(raw)["msg"]["data"]
-        except (ValueError, KeyError, TypeError):
-            continue
-        if "device" not in data:
-            continue
-        data.setdefault("ip", addr[0])
-        found[data["device"]] = data
-    rx.close()
-    tx.close()
-    return found
+        found, end = {}, time.monotonic() + timeout
+        while time.monotonic() < end:
+            try:
+                raw, addr = rx.recvfrom(4096)
+            except socket.timeout:
+                continue
+            try:
+                data = json.loads(raw)["msg"]["data"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            if not isinstance(data, dict) or not isinstance(data.get("device"), str):
+                continue
+            data["ip"] = addr[0]
+            found[data["device"]] = data
+        return found
+    finally:
+        rx.close()
+        tx.close()
 
 
 def lan_send(ip, cmd, data):
@@ -182,18 +253,18 @@ def lan_send(ip, cmd, data):
         sock.close()
 
 
+@locked(lan_lock_path)
 def lan_state(ip, timeout=1.5):
     """devStatus round-trip. None if the device doesn't answer in time — the
     caller must fall back rather than treat silence as 'off'."""
-    bind_ip = local_ip()
     try:
-        rx, tx = lan_socket(bind_ip)
+        rx, tx = lan_socket(local_ip())
     except OSError:
         return None
     try:
         tx.sendto(json.dumps(lan_payload("devStatus", {})).encode(), (ip, PORT_CMD))
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             try:
                 raw, addr = rx.recvfrom(4096)
             except socket.timeout:
@@ -201,7 +272,9 @@ def lan_state(ip, timeout=1.5):
             if addr[0] != ip:
                 continue
             try:
-                return json.loads(raw)["msg"]["data"]
+                msg = json.loads(raw)["msg"]
+                if isinstance(msg, dict) and msg.get("cmd") == "devStatus" and isinstance(msg.get("data"), dict):
+                    return msg["data"]
             except (ValueError, KeyError, TypeError):
                 continue
         return None
@@ -223,7 +296,9 @@ def cloud(path, body=None):
             body = json.load(resp)
         # Govee answers a rejected command with HTTP 200 and code 400 in the
         # body. Trusting the status line makes every failure look like a win.
-        if body.get("code") not in (200, None):
+        if not isinstance(body, dict):
+            die("Govee returned a malformed response")
+        if body.get("code") != 200:
             die("Govee: %s (code %s)" % (body.get("msg", "?"), body.get("code")))
         return body
     except urllib.error.HTTPError as exc:
@@ -237,7 +312,11 @@ def cloud_devices(max_age=86400):
     and a bar widget must not spend that budget on redraws."""
     path = os.path.join(CACHE, "devices.json")
     cached = read_json(path)
+    if cached and type(cached.get("fetched")) not in (int, float):
+        die("Malformed device cache timestamp")
     if cached and time.time() - cached.get("fetched", 0) < max_age:
+        if not isinstance(cached.get("devices"), list):
+            die("Malformed cached device inventory")
         return cached["devices"]
     devices = cloud("/router/api/v1/user/devices").get("data", [])
     write_json(path, {"fetched": time.time(), "devices": devices})
@@ -250,16 +329,32 @@ def devices():
     """Cloud devices annotated with a LAN ip where scan found one."""
     lan = read_json(os.path.join(CACHE, "lan.json"), {}) or {}
     out = []
-    for dev in cloud_devices():
+    inventory = cloud_devices()
+    if not isinstance(inventory, list):
+        die("Malformed device inventory")
+    for dev in inventory:
+        if not isinstance(dev, dict) or any(not isinstance(dev.get(k), str) or not dev[k] for k in ("sku", "device")):
+            die("Malformed device inventory entry")
+        if dev.get("deviceName") is not None and not isinstance(dev["deviceName"], str):
+            die("Malformed device name")
+        if not isinstance(dev.get("capabilities", []), list):
+            die("Malformed device capabilities")
         entry = {
             "sku": dev.get("sku"),
             "mac": dev.get("device"),
             "name": dev.get("deviceName") or dev.get("sku"),
             "ip": None,
+            "capabilities": dev.get("capabilities", []),
         }
         hit = lan.get(entry["mac"])
         if hit:
-            entry["ip"] = hit.get("ip")
+            if not isinstance(hit, dict) or not isinstance(hit.get("ip"), str):
+                die("Malformed LAN cache entry")
+            try:
+                socket.inet_aton(hit["ip"])
+            except OSError:
+                die("Invalid LAN cache IP address")
+            entry["ip"] = hit["ip"]
         out.append(entry)
     return out
 
@@ -275,20 +370,27 @@ def resolve(name=None):
             return devs[0]
         die("Several devices — name one, or set a default:\n  %s"
             % "\n  ".join(d["name"] for d in devs))
+    if not isinstance(name, str):
+        die("Device identifier must be a string")
     want = name.strip().lower()
     if not want:
         die("Empty device name.")  # "" is a substring of every name
+    for dev in devs:
+        if want == (dev["mac"] or "").lower():
+            return dev
     labels = load_labels()
     # Exact before substring: `lvrt1` is inside `lvrt10`, and taking the first
     # substring hit moved whichever came first in the account list.
     exact = [d for d in devs
              if want in ((d["name"] or "").lower(), (d["mac"] or "").lower(),
-                         labels.get(d["name"], "").lower())]
+                         labels.get(d["mac"], labels.get(d["name"], "")).lower())]
+    if len(exact) > 1:
+        die("Ambiguous device %r; use a MAC: %s" % (name, ", ".join(d["mac"] for d in exact)))
     if exact:
         return exact[0]
     matches = [d for d in devs
                if want in (d["name"] or "").lower()
-               or want in labels.get(d["name"], "").lower()]
+               or want in labels.get(d["mac"], labels.get(d["name"], "")).lower()]
     if len(matches) > 1:
         die("%r matches several devices: %s — use the full name"
             % (name, ", ".join(d["name"] for d in matches)))
@@ -324,11 +426,53 @@ def load_rooms():
     minute from the bar and a read must never write the file."""
     seen, rooms = set(), {}
     for room, names in (read_json(rooms_path(), {}) or {}).items():
+        check_room_name(room)
+        if not isinstance(names, list) or any(not isinstance(n, str) or not n for n in names):
+            die("Room %r must contain a list of device IDs or names" % room)
         kept = [n for n in dict.fromkeys(names) if n not in seen]
         seen.update(kept)
         if kept:
             rooms[room] = kept
     return rooms
+
+
+def canonical_rooms(rooms):
+    seen, result = set(), {}
+    for room, members in rooms.items():
+        ids = list(dict.fromkeys(resolve(n)["mac"] for n in members))
+        kept = [mac for mac in ids if mac not in seen]
+        seen.update(kept)
+        if kept:
+            result[room] = kept
+    return result
+
+
+@locked(config_lock_path)
+def migrate_ids():
+    """Explicit migration: validate all references before writing any files."""
+    import copy
+    rooms = canonical_rooms(load_rooms())
+    old_labels = load_labels()
+    labels = {resolve(n)["mac"]: label for n, label in old_labels.items()}
+    labels.update({d["mac"]: old_labels[d["mac"]] for d in devices() if d["mac"] in old_labels})
+    default = read_json(os.path.join(CONFIG, "default.json"), {})
+    if default.get("name"):
+        default = {"name": resolve(default["name"])["mac"]}
+    scenes = copy.deepcopy(load_scenes())
+    for name, steps in scenes.items():
+        scene_plan(name)
+        for step in steps:
+            target = step.get("target", "all")
+            if target != "all" and not target.startswith("room:"):
+                step["target"] = resolve(target)["mac"]
+    for path, data in ((rooms_path(), rooms), (labels_path(), labels),
+                       (os.path.join(CONFIG, "default.json"), default), (scenes_path(), scenes)):
+        if os.path.exists(path):
+            backup = path + ".before-ids"
+            if not os.path.exists(backup):
+                with open(backup, "x") as fh:
+                    json.dump(read_json(path), fh, indent=2)
+        write_json(path, data)
 
 
 def auto_rooms(devs):
@@ -338,7 +482,7 @@ def auto_rooms(devs):
     groups = {}
     for dev in devs:
         match = re.match(r"[a-zA-Z]+", dev["name"] or "")
-        if match:
+        if match and match.group(0).lower() not in RESERVED_ROOMS:
             groups.setdefault(match.group(0).lower(), []).append(dev["name"])
     return {k: v for k, v in groups.items() if len(v) > 1}
 
@@ -359,7 +503,10 @@ KINDS = {
 
 
 def device_kind(sku):
+    sku = sku or ""
     overrides = read_json(os.path.join(CONFIG, "icons.json"), {}) or {}
+    if any(v not in ("bulb", "strip", "lamp", "string") for v in overrides.values()):
+        die("Unknown device icon kind in icons.json")
     if sku in overrides:
         return overrides[sku]
     for prefix in sorted(KINDS, key=len, reverse=True):
@@ -373,15 +520,22 @@ def labels_path():
 
 
 def load_labels():
-    """{device name: friendly name}. Cosmetic only — the device keeps the name
-    Govee knows it by, so every command, scene and room file stays valid if the
-    label changes."""
-    return read_json(labels_path(), {}) or {}
+    """{MAC: friendly name}; legacy device-name keys remain readable."""
+    labels = read_json(labels_path(), {})
+    if any(not isinstance(v, str) for v in labels.values()):
+        die("Labels must be strings")
+    return labels
 
 
+@locked(config_lock_path)
 def set_label(name, text):
     labels = load_labels()
-    if text:
+    dev = resolve(name)
+    # Remove the old name-keyed label too, so clearing a migrated label stays clear.
+    if dev["name"] in labels and sum(d["name"] == dev["name"] for d in devices()) == 1:
+        labels.pop(dev["name"], None)
+    name = dev["mac"]
+    if text or dev["name"] in labels:
         labels[name] = text
     else:
         labels.pop(name, None)
@@ -389,17 +543,19 @@ def set_label(name, text):
     return labels
 
 
-def assign_room(room, names):
+@locked(config_lock_path)
+def assign_room(room, names, rooms=None):
     """Move devices into `room`, or out of every room when room is 'none'.
     A device lives in one room: leaving it in two makes `room:` targets fire
     twice and the panel draw it twice."""
     names = list(dict.fromkeys(names))
-    rooms = load_rooms()
+    rooms = load_rooms() if rooms is None else rooms
     for key in list(rooms):
         rooms[key] = [n for n in rooms[key] if n not in names]
         if not rooms[key]:
             del rooms[key]
     if room != "none":
+        room = check_room_name(room)
         rooms.setdefault(room, []).extend(names)
     write_json(rooms_path(), rooms)
     return rooms
@@ -419,46 +575,90 @@ DEFAULT_SCENES = {
 
 def load_scenes():
     scenes = read_json(scenes_path())
-    if scenes is None:
-        write_json(scenes_path(), DEFAULT_SCENES)
-        return dict(DEFAULT_SCENES)
-    return scenes
+    return dict(DEFAULT_SCENES) if scenes is None else scenes
 
 
 def resolve_many(target):
     """A device name, `room:<name>`, or `all` -> list of devices."""
     devs = devices()
     if target == "all":
+        if not devs:
+            die("No devices on the account")
         return devs
+    if target == "room:other":
+        assigned = {mac for members in canonical_rooms(load_rooms()).values() for mac in members}
+        unassigned = [d for d in devs if d["mac"] not in assigned]
+        if not unassigned:
+            die("No unassigned devices")
+        return unassigned
     if target.startswith("room:"):
         names = load_rooms().get(target[5:], [])
         if not names:
             die("No room %r. Known: %s" % (target[5:], ", ".join(load_rooms()) or "none"))
-        return [d for d in devs if d["name"] in names]
+        members = [resolve(n) for n in names]
+        return list({d["mac"]: d for d in members}.values())
     return [resolve(target)]
 
 
-def run_scene(name):
+def scene_plan(name):
     scenes = load_scenes()
     if name not in scenes:
         die("No scene %r. Known: %s" % (name, ", ".join(sorted(scenes))))
-    for step in scenes[name]:
-        for dev in resolve_many(step.get("target", "all")):
-            # Power first: colour and brightness on a dark lamp are invisible.
-            if "power" in step:
-                apply(dev, "power", int(step["power"]))
-            if step.get("power") == 0:
-                continue
-            if "brightness" in step:
-                apply(dev, "brightness", int(step["brightness"]))
-            if "color" in step:
-                apply(dev, "color", parse_color(str(step["color"])))
+    steps = scenes[name]
+    if not isinstance(steps, list) or not steps:
+        die("Scene must contain at least one step")
+    plan = []
+    for step in steps:
+        if not isinstance(step, dict) or set(step) - {"target", "power", "brightness", "color"}:
+            die("Invalid scene step")
+        target = step.get("target", "all")
+        if not isinstance(target, str) or not target.strip():
+            die("Scene target must be a nonempty string")
+        actions = []
+        for kind in ("power", "brightness", "color"):
+            if kind in step:
+                value = parse_color(step[kind]) if kind == "color" and isinstance(step[kind], str) else step[kind]
+                validate_value(kind, value)
+                actions.append((kind, value))
+        if not actions:
+            die("Scene step has no actions")
+        for dev in resolve_many(target):
+            for kind, value in actions:
+                if step.get("power") == 0 and kind != "power":
+                    continue
+                plan.append((dev, kind, value))
+    return plan
+
+
+def run_scene(name):
+    return execute(scene_plan(name))
+
+
+def validate_value(kind, value):
+    maximum = {"power": 1, "brightness": 100, "color": 0xFFFFFF}.get(kind)
+    if maximum is None or type(value) is not int or not 0 <= value <= maximum:
+        die("Invalid %s value: %r" % (kind, value))
+
+
+def execute(plan):
+    results = []
+    for dev, kind, value in plan:
+        validate_value(kind, value)
+    for dev, kind, value in plan:
+        try:
+            result = apply(dev, kind, value)
+        except (GoveeError, OSError, ValueError) as exc:
+            result = {"device": dev["mac"], "kind": kind, "requested": value,
+                      "status": "failed", "transport": "cloud", "error": str(exc)}
+        results.append(result)
+    return {"ok": all(r["status"] != "failed" for r in results), "results": results}
 
 
 # --- actions ----------------------------------------------------------------
 
 def apply(dev, kind, value):
     """kind: power|brightness|color. LAN when we know an ip, cloud otherwise."""
+    validate_value(kind, value)
     lan_cmd = {
         "power": ("turn", {"value": value}),
         "brightness": ("brightness", {"value": value}),
@@ -470,68 +670,97 @@ def apply(dev, kind, value):
         "color": ("devices.capabilities.color_setting", "colorRgb"),
     }[kind]
 
+    result = {"device": dev["mac"], "kind": kind, "requested": value}
     if dev["ip"]:
-        # UDP is unacknowledged: a dropped command is indistinguishable from a
-        # delivered one. Observed in practice — a lost `turn` left the light off
-        # while the command reported success. devStatus costs ~20ms, so read
-        # back and resend once rather than lie about it.
-        for attempt in range(2):
-            lan_send(dev["ip"], *lan_cmd)
-            if kind == "color":
-                break  # no cheap equality test for a colour we may have gamma-shifted
+        try:
+            observed = lan_apply(dev["ip"], lan_cmd, kind, value)
+        except OSError:
+            observed = None
+        if observed is not None:
+            return dict(result, transport="lan", status="confirmed", observed=observed)
+        result["lan_error"] = "LAN read-back did not confirm the requested value"
+    ctype, instance = cloud_cap
+    cloud("/router/api/v1/device/control",
+          cloud_payload(dev["sku"], dev["mac"], ctype, instance, value,
+                        req_id="omagovee-%s" % time.time_ns()))
+    # Cloud acknowledgement is not proof that the physical lamp changed.
+    return dict(result, transport="cloud", status="unverified")
+
+
+@locked(lan_lock_path)
+def lan_apply(ip, command, kind, value):
+    expected = rgb(value) if kind == "color" else value
+    for attempt in range(2):
+        try:
+            lan_send(ip, *command)
             time.sleep(0.4)
-            status = lan_state(dev["ip"])
-            if status is None:
-                break  # device went quiet; the send may still have landed
-            got = status.get("onOff") if kind == "power" else status.get("brightness")
-            if got == value:
-                break
-        else:
-            die("%s did not accept %s=%s over LAN" % (dev["name"], kind, value))
-    else:
-        ctype, instance = cloud_cap
-        cloud("/router/api/v1/device/control",
-              cloud_payload(dev["sku"], dev["mac"], ctype, instance, value,
-                            req_id="omagovee-%d" % time.time()))
+            status = lan_state(ip)
+        except OSError:
+            status = None
+        if status:
+            got = status.get({"power": "onOff", "brightness": "brightness", "color": "color"}[kind])
+            if got == expected:
+                return got
+    return None
 
 
 def power_state(dev):
     """{"online": bool, "power": 0|1|None}. `power` is meaningless when the
     device is offline — the cloud keeps serving its last known value."""
     if dev["ip"]:
-        data = lan_state(dev["ip"])
+        try:
+            data = lan_state(dev["ip"])
+        except OSError:
+            data = None
         if data and "onOff" in data:
-            return {"online": True, "power": int(data["onOff"])}
+            return {"online": True, "power": int(data["onOff"]),
+                    "brightness": data.get("brightness"), "color": data.get("color"),
+                    "transport": "lan"}
     resp = cloud("/router/api/v1/device/state",
                  {"requestId": "omagovee", "payload":
                   {"sku": dev["sku"], "device": dev["mac"]}})
-    out = {"online": True, "power": None}
-    for cap in resp.get("payload", {}).get("capabilities", []):
-        if cap.get("instance") == "online":
-            out["online"] = bool(cap.get("state", {}).get("value", True))
-        elif cap.get("instance") == "powerSwitch":
-            out["power"] = int(cap.get("state", {}).get("value", 0))
+    out = {"online": None, "power": None, "brightness": None, "color": None,
+           "transport": "cloud"}
+    payload = resp.get("payload")
+    if not isinstance(payload, dict) or not isinstance(payload.get("capabilities"), list):
+        die("Malformed cloud state response")
+    for cap in payload["capabilities"]:
+        if not isinstance(cap, dict) or not isinstance(cap.get("state"), dict):
+            die("Malformed cloud state capability")
+        instance, value = cap.get("instance"), cap["state"].get("value")
+        if instance == "online":
+            if type(value) not in (bool, int) or value not in (0, 1):
+                die("Invalid cloud reachability value")
+            out["online"] = bool(value)
+        elif instance in ("powerSwitch", "brightness", "colorRgb"):
+            key = {"powerSwitch": "power", "brightness": "brightness", "colorRgb": "color"}[instance]
+            validate_value(key, value)
+            out[key] = rgb(value) if key == "color" else value
+    if out["online"] is None:
+        out["error"] = "Cloud response did not report reachability"
+    if out["online"] is False:
+        out.update(power=None, brightness=None, color=None)
     return out
 
 
 def dump():
     """Everything the panel draws, as one JSON document.
 
-    States are fetched concurrently: serially this is 15 cloud round-trips and
-    a panel that takes five seconds to open."""
+    Cloud reads are concurrent; LAN exchanges share the protocol reply port
+    and are serialized by lan_state()."""
     devs = devices()
 
     labels = load_labels()
 
     def annotate(dev):
         entry = dict(dev)
-        entry["label"] = labels.get(dev["name"], "")
+        entry["label"] = labels.get(dev["mac"], labels.get(dev["name"], ""))
         entry["kind"] = device_kind(dev["sku"])
         try:
             state = power_state(dev)
-            entry.update(online=state["online"], power=state["power"])
-        except SystemExit:
-            entry.update(online=False, power=None)  # die() inside a worker
+            entry.update(state)
+        except (GoveeError, OSError, ValueError) as exc:
+            entry.update(online=None, power=None, brightness=None, color=None, error=str(exc))
         return entry
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
@@ -561,15 +790,34 @@ USAGE = __doc__.split("\n\n")[0] + """
   omarchy-govee scene [name]         run a scene, or list them
   omarchy-govee dump                 JSON of everything, for the panel
 
-  Any [dev] may be a name, `room:<name>` or `all`.
+  State/on/off/brightness/color targets accept a MAC, name, room:<name> or all.
+  toggle accepts a single device.
+  --json list|scenes|state TARGET|on TARGET|off TARGET|brightness N TARGET|color HEX TARGET|scene NAME
+  migrate-ids                     migrate stored device names to MACs (with backups)
 """ % "|".join(sorted(COLORS))
 
 
-def main(argv):
+@locked(config_lock_path)
+def edit_config(argv):
+    return main(argv, config_locked=True)
+
+
+def main(argv, config_locked=False):
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(USAGE)
         return 0
     cmd, args = argv[0], argv[1:]
+    if cmd in ("rooms", "label", "default") and args and not config_locked:
+        return edit_config(argv)
+    if cmd == "--json":
+        result = json_command(args)
+        print(json.dumps(result))
+        return 0 if result.get("ok", True) else 1
+
+    if cmd == "migrate-ids" and not args:
+        migrate_ids()
+        print("Migrated device references to MACs; originals saved as *.before-ids")
+        return 0
 
     if cmd == "scan":
         found = lan_scan()
@@ -593,18 +841,14 @@ def main(argv):
         if not args:
             die("usage: omarchy-govee default <device>")
         dev = resolve(args[0])
-        write_json(os.path.join(CONFIG, "default.json"), {"name": dev["name"]})
+        write_json(os.path.join(CONFIG, "default.json"), {"name": dev["mac"]})
         print("default: %s" % dev["name"])
         return 0
 
     if cmd in ("on", "off"):
         value = 1 if cmd == "on" else 0
-        if args and (args[0] == "all" or args[0].startswith("room:")):
-            for dev in resolve_many(args[0]):
-                apply(dev, "power", value)
-            return 0
-        apply(resolve(args[0] if args else None), "power", value)
-        return 0
+        return report(execute([(d, "power", value) for d in
+                               (resolve_many(args[0]) if args else [resolve()])]))
 
     if cmd == "toggle":
         dev = resolve(args[0] if args else None)
@@ -613,9 +857,7 @@ def main(argv):
             die("%s is offline — check its power and Wi-Fi" % dev["name"])
         if current["power"] is None:
             die("Could not read state of %s" % dev["name"])
-        apply(dev, "power", 0 if current["power"] else 1)
-        print("%s: %s" % (dev["name"], "off" if current["power"] else "on"))
-        return 0
+        return report(execute([(dev, "power", 0 if current["power"] else 1)]))
 
     if cmd == "brightness":
         if not args:
@@ -623,9 +865,8 @@ def main(argv):
         value = int(args[0])
         if not 0 <= value <= 100:
             die("brightness must be 0-100")
-        for dev in (resolve_many(args[1]) if len(args) > 1 else [resolve(None)]):
-            apply(dev, "brightness", value)
-        return 0
+        return report(execute([(d, "brightness", value) for d in
+                               (resolve_many(args[1]) if len(args) > 1 else [resolve()])]))
 
     if cmd == "color":
         if not args:
@@ -635,9 +876,8 @@ def main(argv):
         except ValueError:
             die("bad colour %r — use RRGGBB or one of: %s"
                 % (args[0], ", ".join(sorted(COLORS))))
-        for dev in (resolve_many(args[1]) if len(args) > 1 else [resolve(None)]):
-            apply(dev, "color", value)
-        return 0
+        return report(execute([(d, "color", value) for d in
+                               (resolve_many(args[1]) if len(args) > 1 else [resolve()])]))
 
     if cmd == "dump":
         print(json.dumps(dump(), indent=2))
@@ -647,15 +887,13 @@ def main(argv):
         if not args:
             print("\n".join(sorted(load_scenes())))
             return 0
-        run_scene(args[0])
-        print("scene: %s" % args[0])
-        return 0
+        return report(run_scene(args[0]))
 
     if cmd == "label":
         if not args:
             die("usage: omarchy-govee label <device> [friendly name]")
         dev = resolve(args[0])
-        labels = set_label(dev["name"], " ".join(args[1:]).strip())
+        labels = set_label(dev["mac"], " ".join(args[1:]).strip())
         print("%s: %s" % (dev["name"], labels.get(dev["name"], "(no label)")))
         return 0
 
@@ -670,10 +908,11 @@ def main(argv):
             if new in current:
                 die("room %r already exists — move its lights with 'rooms assign'"
                     % new)
+            current = canonical_rooms(current)
             current[new] = current.pop(args[1])
             write_json(rooms_path(), current)
         elif args and args[0] == "--auto":
-            current = auto_rooms(devices())
+            current = canonical_rooms(auto_rooms(devices()))
             write_json(rooms_path(), current)
         elif args:
             # `rooms <room> <dev>...` is `rooms assign`: it used to replace the
@@ -683,28 +922,80 @@ def main(argv):
                 die("usage: omarchy-govee rooms [assign] <room|none> <device>...")
             # Name first, so a bad one fails before any device lookup hits the API.
             room = target[0] if target[0] == "none" else check_room_name(target[0])
-            current = assign_room(room, [resolve(n)["name"] for n in target[1:]])
+            ids = [resolve(n)["mac"] for n in target[1:]]
+            canonical = canonical_rooms(current)
+            current = assign_room(room, ids, canonical)
         for room, members in sorted(current.items()):
             print("%-12s %s" % (room, " ".join(members)))
         return 0
 
     if cmd == "state":
-        dev = resolve(args[0] if args else None)
-        current = power_state(dev)
-        if not current["online"]:
-            print("%s: offline" % dev["name"])
-            return 1
-        print("%s: %s" % (dev["name"],
-                          {None: "unknown", 0: "off", 1: "on"}[current["power"]]))
-        return 0
+        failed = False
+        for dev in (resolve_many(args[0]) if args else [resolve()]):
+            try:
+                current = power_state(dev)
+                state = {None: "unknown", 0: "off", 1: "on"}.get(current["power"], "unknown")
+                if current["online"] is not True:
+                    state = "offline" if current["online"] is False else "unknown"
+                    failed = True
+                print("%s: %s" % (dev["name"], state))
+            except (GoveeError, OSError, ValueError) as exc:
+                print("%s: %s" % (dev["name"], exc), file=sys.stderr)
+                failed = True
+        return int(failed)
 
     die("unknown command %r\n\n%s" % (cmd, USAGE), 2)
+
+
+def report(result):
+    for item in result["results"]:
+        if item["status"] != "confirmed":
+            print("%s: %s%s" % (item["device"], item["status"],
+                                ": " + item["error"] if "error" in item else " (cloud accepted; not read back)"),
+                  file=sys.stderr)
+    return 0 if result["ok"] else 1
+
+
+def json_command(args):
+    if not args:
+        die("Expected a JSON command")
+    cmd, args = args[0], args[1:]
+    if cmd == "list" and not args:
+        return {"devices": devices(), "rooms": load_rooms(), "labels": load_labels()}
+    if cmd == "scenes" and not args:
+        scenes = load_scenes()
+        return {"scenes": scenes}
+    if cmd == "scene" and len(args) == 1:
+        return run_scene(args[0])
+    if cmd == "state" and len(args) == 1:
+        results = []
+        for dev in resolve_many(args[0]):
+            try:
+                results.append(dict(device=dev["mac"], **power_state(dev)))
+            except (GoveeError, OSError, ValueError) as exc:
+                results.append({"device": dev["mac"], "online": None, "error": str(exc)})
+        return {"ok": all("error" not in r for r in results), "devices": results}
+    if cmd in ("on", "off") and len(args) == 1:
+        kind, value, target = "power", int(cmd == "on"), args[0]
+    elif cmd in ("brightness", "color") and len(args) == 2:
+        kind, target = cmd, args[1]
+        value = parse_color(args[0]) if cmd == "color" else int(args[0])
+    else:
+        die("Invalid JSON command or arguments")
+    validate_value(kind, value)
+    return execute([(d, kind, value) for d in resolve_many(target)])
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv[1:]))
     except BrokenPipeError:
-        sys.exit(0)  # `| head` closed the pipe; that is not a failure
+        sys.exit(0)
+    except (GoveeError, OSError, ValueError) as exc:
+        if sys.argv[1:2] == ["--json"]:
+            print(json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            print(str(exc), file=sys.stderr)
+        sys.exit(getattr(exc, "code", 1))
     except KeyboardInterrupt:
         sys.exit(130)

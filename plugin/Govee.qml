@@ -30,6 +30,8 @@ BarWidget {
   property var scenes: []
   property string expandedName: ""
   property bool loading: false
+  property bool refreshPending: false
+  property string refreshError: ""
   property bool lit: false
   property string busyName: ""
   // PanelKeyCatcher eats plain keys before descendants see them; while a name
@@ -74,7 +76,7 @@ BarWidget {
   onOpenedChanged: if (opened) refresh()
 
   function refresh() {
-    if (dumpProc.running) return
+    if (dumpProc.running) { refreshPending = true; return }
     loading = true
     dumpProc.running = true
   }
@@ -105,6 +107,7 @@ BarWidget {
 
   function applyDump(text) {
     var data = JSON.parse(text)
+    if (!data.devices || !data.rooms || !data.scenes) throw new Error("Invalid dump")
     root.devices = data.devices || []
     root.scenes = data.scenes || []
 
@@ -116,20 +119,23 @@ BarWidget {
     for (var i = 0; i < names.length; i++) {
       var members = []
       for (var j = 0; j < data.devices.length; j++) {
-        if ((data.rooms[names[i]] || []).indexOf(data.devices[j].name) >= 0) {
+        if ((data.rooms[names[i]] || []).indexOf(data.devices[j].mac) >= 0
+            || (data.rooms[names[i]] || []).indexOf(data.devices[j].name) >= 0) {
           members.push(data.devices[j])
-          assigned[data.devices[j].name] = true
+          assigned[data.devices[j].mac] = true
         }
       }
       if (members.length > 0) list.push({ name: names[i], members: members })
     }
     var rest = []
     for (var k = 0; k < data.devices.length; k++)
-      if (!assigned[data.devices[k].name]) rest.push(data.devices[k])
+      if (!assigned[data.devices[k].mac]) rest.push(data.devices[k])
     if (rest.length > 0) list.push({ name: "other", members: rest })
     root.roomList = list
     root.roomNames = names
 
+    if (root.devices.some(function (d) { return !!d.error }))
+      root.refreshError = "Some lights could not be refreshed; state is unknown"
     var anyOn = false
     for (var m = 0; m < root.devices.length; m++)
       if (root.devices[m].power === 1) anyOn = true
@@ -142,11 +148,20 @@ BarWidget {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        try { root.applyDump(text) } catch (e) { }
+        try { root.refreshError = ""; root.applyDump(text) }
+        catch (e) { root.refreshError = "Could not refresh lights; displayed state is stale" }
         root.loading = false
       }
     }
-    onExited: root.loading = false
+    stderr: StdioCollector { id: dumpErr; waitForEnd: true }
+    onExited: function (code) {
+      root.loading = false
+      if (code !== 0) root.refreshError = dumpErr.text.trim() || "Could not refresh lights"
+      if (root.refreshPending) {
+        root.refreshPending = false
+        Qt.callLater(root.refresh)
+      }
+    }
   }
 
   Process {
@@ -165,7 +180,7 @@ BarWidget {
       // Re-read rather than assume: a command can fail (offline device, a
       // dropped LAN packet the CLI could not recover) and the panel must show
       // what happened, not what was asked for.
-      if (root.queue.length === 0 && root.opened) root.refresh()
+      if (root.queue.length === 0) root.refresh()
     }
   }
 
@@ -179,7 +194,7 @@ BarWidget {
     interval: 60000
     running: true
     repeat: true
-    onTriggered: if (!root.opened) root.refresh()
+    onTriggered: if (root.editors === 0 && !root.dragName) root.refresh()
   }
 
   BarIconButton {
@@ -189,8 +204,8 @@ BarWidget {
     // nf-md-lightbulb_on / nf-md-lightbulb_outline. The size is deliberately
     // NOT overridden: BarIconButton defaults to Style.bar.iconFont in the
     // iconSlot, which is what every other icon on the bar is drawn at.
-    text: root.lit ? "󰛨" : "󰌶"
-    tooltipText: "Lights"
+    text: root.refreshError ? "!" : (root.lit ? "󰛨" : "󰌶")
+    tooltipText: root.refreshError || "Lights"
     onPressed: function (b) {
       if (b === Qt.RightButton) root.act(["toggle"], "")
       else root.toggle()
@@ -361,11 +376,15 @@ BarWidget {
                   PanelSlider {
                     width: parent.width
                     bar: root.bar
-                    minimum: 1
+                    minimum: 0
                     maximum: 100
                     step: 1
                     integer: true
-                    value: 50
+                    value: {
+                      var levels = roomItem.room.members.map(function (d) { return d.brightness })
+                        .filter(function (v) { return typeof v === "number" })
+                      return levels.length ? Math.round(levels.reduce(function (a, b) { return a + b }, 0) / levels.length) : 0
+                    }
                     onReleased: function (v) {
                       root.act(["brightness", String(Math.round(v)),
                                 "room:" + roomItem.room.name], "")
@@ -408,7 +427,7 @@ BarWidget {
                     id: devItem
                     required property var modelData
                     readonly property var dev: modelData
-                    readonly property bool isExpanded: root.expandedName === dev.name
+                    readonly property bool isExpanded: root.expandedName === dev.mac
                     width: column.width
                     spacing: Style.space(4)
 
@@ -416,7 +435,7 @@ BarWidget {
                     Item {
                       width: parent.width
                       implicitHeight: Math.max(nameText.implicitHeight, sw.implicitHeight)
-                      z: root.dragName === devItem.dev.name ? 100 : 0
+                      z: root.dragName === devItem.dev.mac ? 100 : 0
 
                       // Only `content` moves while dragging. The row keeps its
                       // slot in the Column, so the list does not reflow under
@@ -428,7 +447,7 @@ BarWidget {
                         opacity: Drag.active ? 0.6 : 1.0
 
                         // Read back off `drop.source` by the room that catches it.
-                        property string devName: devItem.dev.name
+                        property string devName: devItem.dev.mac
                         property string devRoom: roomItem.room.name
 
                         Drag.active: dragArea.drag.active
@@ -464,7 +483,7 @@ BarWidget {
                           // stray click should not make every room heading jump.
                           onPositionChanged: {
                             if (drag.active && root.dragName === "") {
-                              root.dragName = devItem.dev.name
+                              root.dragName = devItem.dev.mac
                               root.dragRoom = roomItem.room.name
                               // Left in deliberately: this gesture cannot be
                               // tested from a shell, so the journal is the only
@@ -516,7 +535,7 @@ BarWidget {
                           anchors.leftMargin: Style.space(6)
                           anchors.verticalCenter: parent.verticalCenter
                           text: (devItem.dev.label || devItem.dev.name)
-                            + (devItem.dev.online ? "" : "  (offline)")
+                            + (devItem.dev.online === true ? "" : devItem.dev.online === false ? "  (offline)" : "  (unknown)")
                             + (devItem.dev.ip ? "  ·  lan" : "")
                           color: root.bar ? root.bar.foreground : Color.foreground
                           opacity: devItem.dev.online ? 1.0 : 0.45
@@ -526,7 +545,7 @@ BarWidget {
                           MouseArea {
                             anchors.fill: parent
                             onClicked: root.expandedName =
-                              devItem.isExpanded ? "" : devItem.dev.name
+                              devItem.isExpanded ? "" : devItem.dev.mac
                           }
                         }
 
@@ -536,10 +555,10 @@ BarWidget {
                           anchors.verticalCenter: parent.verticalCenter
                           checked: devItem.dev.power === 1
                           interactive: devItem.dev.online
-                          busy: root.busyName === devItem.dev.name
+                          busy: root.busyName === devItem.dev.mac
                           foreground: root.bar ? root.bar.foreground : Color.foreground
-                          onToggled: root.act([checked ? "off" : "on", devItem.dev.name],
-                                              devItem.dev.name)
+                          onToggled: root.act([checked ? "off" : "on", devItem.dev.mac],
+                                              devItem.dev.mac)
                         }
                       }
                     }
@@ -561,7 +580,7 @@ BarWidget {
                         foreground: root.bar ? root.bar.foreground : Color.foreground
                         onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
                         onAccepted: {
-                          root.act(["label", devItem.dev.name].concat(
+                          root.act(["label", devItem.dev.mac].concat(
                             text ? [text] : []), "")
                           focus = false
                         }
@@ -601,7 +620,7 @@ BarWidget {
                               anchors.fill: parent
                               hoverEnabled: true
                               onClicked: root.act(["rooms", "assign",
-                                                   parent.modelData, devItem.dev.name], "")
+                                                   parent.modelData, devItem.dev.mac], "")
                             }
                           }
                         }
@@ -619,7 +638,7 @@ BarWidget {
                         onAccepted: {
                           var name = text.trim()
                           if (name)
-                            root.act(["rooms", "assign", name, devItem.dev.name], "")
+                            root.act(["rooms", "assign", name, devItem.dev.mac], "")
                           text = ""
                           focus = false
                         }
@@ -628,14 +647,16 @@ BarWidget {
                       PanelSlider {
                         width: parent.width
                         bar: root.bar
-                        minimum: 1
+                        minimum: 0
                         maximum: 100
                         step: 1
                         integer: true
-                        value: 50
+                        value: devItem.dev.brightness === null || devItem.dev.brightness === undefined
+                          ? 0 : devItem.dev.brightness
+                        enabled: typeof devItem.dev.brightness === "number"
                         onReleased: function (v) {
-                          root.act(["brightness", String(Math.round(v)), devItem.dev.name],
-                                   devItem.dev.name)
+                          root.act(["brightness", String(Math.round(v)), devItem.dev.mac],
+                                   devItem.dev.mac)
                         }
                       }
 
@@ -659,7 +680,7 @@ BarWidget {
                               anchors.fill: parent
                               hoverEnabled: true
                               onClicked: root.act(["color", parent.modelData.name,
-                                                   devItem.dev.name], devItem.dev.name)
+                                                   devItem.dev.mac], devItem.dev.mac)
                             }
                           }
                         }

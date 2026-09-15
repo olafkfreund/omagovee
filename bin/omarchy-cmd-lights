@@ -12,7 +12,9 @@ set -euo pipefail
 device=${1:-}
 if [[ -z $device ]]; then
   # Cached list — no API call unless the cache is cold.
-  device=$(omarchy-govee list | gum choose --header "Light:" | awk '{print $1}' || true)
+  choices=$(omarchy-govee --json list | python3 -c 'import json,sys; print("\n".join(d["mac"] + "\t" + d["name"].replace("\n", " ").replace("\t", " ") for d in json.load(sys.stdin)["devices"]))')
+  choice=$(printf '%s\n' "$choices" | gum choose --header "Light:" || true)
+  device=${choice%%$'\t'*}
   [[ -n $device ]] || exit 0
 fi
 

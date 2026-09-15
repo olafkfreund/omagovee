@@ -19,11 +19,13 @@ else falls back to the cloud. No account of ours, no broker, no MQTT.
 |---|---|
 | `bin/omarchy-govee` | The whole client — scan, list, on/off/toggle, brightness, colour |
 | `bin/omarchy-cmd-lights` | `gum` picker: device → action → value; for the menu row and the widget |
+| `bin/omagovee-mcp` | Optional stdio MCP server for AI agents |
 | `plugin/` | Omarchy bar widget + dropdown panel: scenes, rooms, per-device toggle/brightness/colour |
 | `test_omagovee.py` | `python3 test_omagovee.py` — payload, colour and room logic |
 
-Python stdlib only. No `jq`, no `curl`, no pip install — a bar-widget click has
-to start fast.
+The controller uses only the Python standard library. The optional MCP adapter
+uses the official `mcp` SDK, pinned in its script metadata; widget clicks do
+not import it.
 
 ## Setup
 
@@ -68,8 +70,11 @@ omarchy-govee scene meeting         # all lights red at 60%
 { "meeting": [ { "target": "room:office", "power": 1, "color": "red", "brightness": 60 } ] }
 ```
 
-Power is applied before colour and brightness — setting a colour on a dark lamp
-is invisible otherwise.
+Every scene is validated and all targets resolved before the first command.
+Power is applied before brightness and colour. Runtime failures are reported
+per device/action; successful changes are not rolled back. If `scenes.json` is
+missing, built-in scenes are used in memory. Reads never create or replace it.
+Malformed files produce an error and are preserved.
 
 Nothing here runs a scene for you. To make "red while in a meeting" automatic,
 hang it off the calendar you already have via `gog`:
@@ -112,12 +117,15 @@ omarchy restart shell
 - The LAN command names (`turn`, `brightness`, `colorwc`, `devStatus`) come
   from Govee's WLAN guide as reproduced by community integrations, not from a
   primary doc that renders without JavaScript. Verified working against H615A.
-  If a model ignores a LAN command, delete its entry from
-  `~/.cache/omagovee/lan.json` to force the cloud path.
-- **LAN writes are read back.** UDP is unacknowledged, and a dropped `turn` was
-  observed reporting success while the light stayed off. Every power/brightness
-  command is confirmed with a `devStatus` (~20ms) and resent once before the
-  command is allowed to claim it worked.
+  If a model ignores a LAN command, the controller retries once and falls back
+  to cloud when read-back cannot confirm the requested value.
+- **LAN writes are read back.** Power, brightness and colour are checked with
+  `devStatus`, with one retry. Exact matching read-back is `confirmed`; a cloud
+  acknowledgement is `unverified`. A cloud rejection is `failed`. Some lamps
+  adjust RGB values, so colours may fall back to cloud even after a LAN write.
+- **LAN replies share UDP port 4002.** Exchanges are serialized across threads
+  and processes using a per-user file lock. Cloud reads remain concurrent.
+  Run updated copies of the CLI everywhere; older versions do not take the lock.
 - **Cloud state lags LAN commands.** After a LAN write the cloud keeps serving
   the old value for a few seconds, which is why state is read over LAN first
   whenever an ip is known.
@@ -137,9 +145,12 @@ keeps dropping when idle, and is a reverse-engineered protocol rather than a
 published API. Once a device is on Wi-Fi the LAN path is faster and more
 reliable. Worth revisiting only for a device that can never join Wi-Fi.
 - The panel and the bar icon both read `omarchy-govee dump`, which fetches all
-  device states concurrently (~1.2s for 15 devices; serially it would be five).
+  cloud states concurrently and LAN states one at a time.
   It refreshes at startup, when the panel opens, after every action, and once a
-  minute while closed. An earlier design cached state in a file the widget
+  minute unless editing or dragging. A pending refresh runs after an in-flight
+  fetch. Refresh errors show `!` in the bar with an explanatory tooltip.
+  Device sliders use reported brightness (disabled if unknown); room sliders
+  show the mean of known brightness values. An earlier design cached state in a file the widget
   watched with inotify — that broke silently, because the CLI's atomic writes
   swap the inode out from under the watch, and a second copy of the state is a
   second thing that can be wrong.
@@ -180,7 +191,7 @@ they already mean "no room", the panel's unassigned heading and every device.
 the old name must be updated with it. Renaming onto a room that already
 exists is refused rather than silently dropping that room's lights.
 
-A device name has to pick one light. An exact name, MAC or label wins;
+A MAC takes precedence. Exact names and labels must identify one device;
 otherwise a partial name is accepted only when it matches a single device,
 so `lvrt` is refused when there are `lvrt1` and `lvrt10` instead of moving
 whichever came first.
@@ -224,3 +235,116 @@ To correct one without touching the code:
     echo '{"H6072": "lamp"}' > ~/.config/omagovee/icons.json
 
 Known kinds: `bulb`, `strip`, `string`, `lamp`.
+
+
+## Stable IDs and existing configuration
+
+New defaults and labels use device MACs. Room edits convert their members to
+MACs, and the widget and picker send MACs rather than display names. Legacy
+name-based files remain readable. Before renaming devices in Govee Home,
+convert existing rooms, labels, defaults and scene device targets:
+
+```bash
+omarchy-govee migrate-ids
+```
+
+Migration validates all references first and saves existing files as
+`*.before-ids` before replacing them. Ambiguous or missing device names must be
+corrected first. Existing backups are preserved on repeat runs. Replacement is
+atomic per file, not across the whole set; after an I/O failure, fix the cause
+and rerun. No lights are changed by migration. Room renames still require
+updating scene `room:` targets.
+
+`room:other` selects unassigned devices. `none` remains the room assignment
+command for removing a light from all rooms.
+
+## AI automation via MCP
+
+Run the server from this checkout (keep both scripts together):
+
+```bash
+uv run --script /absolute/path/to/omagovee/bin/omagovee-mcp
+```
+
+`uv` reads the adapter's inline dependency pin, creates an isolated script
+environment and starts the stdio server. If your Python already has
+`mcp==1.29.0`, `python3 bin/omagovee-mcp` also works. The adapter uses the
+[official Python SDK's v1 API](https://py.sdk.modelcontextprotocol.io/v1/).
+
+Configure an MCP host with this server command and arguments; for hosts using
+`mcpServers` JSON:
+
+```json
+{
+  "mcpServers": {
+    "omagovee": {
+      "command": "uv",
+      "args": ["run", "--script", "/absolute/path/to/omagovee/bin/omagovee-mcp"]
+    }
+  }
+}
+```
+
+The server inherits `GOVEE_API_KEY`, or reads the existing
+`~/.config/omagovee/api-key`. It also respects `OMAGOVEE_CONFIG`,
+`OMAGOVEE_CACHE` and `OMAGOVEE_IFACE_IP`. Keep credentials out of tool arguments.
+A host launches the server on demand; no listener, service or firewall change
+is needed. Registration in a particular agent app is a separate host setting.
+
+| Tool | Arguments | Result |
+|---|---|---|
+| `list_devices` | none | MACs, names, capabilities, rooms and labels; no state polling |
+| `get_state` | `target` | Power, brightness, RGB colour, reachability, transport and read errors |
+| `set_power` | `target`, `on` boolean | Per-device confirmation status |
+| `set_brightness` | `target`, `percent` integer 0–100 | Per-device confirmation status |
+| `set_color` | `target`, `color` | RRGGBB, #RRGGBB or a named colour |
+| `list_scenes` | none | Scene definitions including targets and requested values |
+| `run_scene` | `name` | Per-action results, including partial failures |
+
+Use MACs returned by `list_devices`, `room:<name>`, or explicitly `all`.
+Names/labels remain accepted but must resolve unambiguously. Power, brightness
+and colour commands set explicit values, making retries safer than `toggle`.
+Brightness/colour do not implicitly turn lights on. There is no toggle tool.
+
+Example agent request: “List my lights, then set room:office to 40% brightness.”
+The agent calls `list_devices`, then `set_brightness` with
+`{"target":"room:office","percent":40}`.
+
+Results distinguish `confirmed` LAN read-back, `unverified` cloud acceptance,
+and `failed`. Group failures return MCP `isError` **and** structured per-device
+results, so successful changes remain visible. Each CLI subprocess has a
+120-second deadline. A timeout stops further commands, but previous writes may
+have reached lamps: read state before deciding whether to retry. Cloud state
+may lag LAN writes; an API acknowledgement is not physical confirmation.
+
+The same machine-readable interface is available without MCP:
+
+```bash
+omarchy-govee --json list
+omarchy-govee --json state room:office
+omarchy-govee --json brightness 40 room:office
+omarchy-govee --json scenes
+omarchy-govee --json scene evening
+```
+
+JSON commands return exit status 1 on failure, including partial failures, and
+keep diagnostic information in the JSON result.
+
+## Verification
+
+```bash
+python3 test_omagovee.py
+python3 test_reliability.py
+python3 test_mcp.py  # requires the adapter's mcp version
+# Or use the same isolated SDK dependency:
+uv run --with mcp==1.29.0 test_mcp.py
+```
+
+Tests use temporary configuration, loopback fake lamps and a fake cloud. The
+MCP check performs a real stdio handshake and exercises all seven tools,
+validation errors and partial failures. No real lamps are controlled.
+
+Manual desktop check after installing the updated CLI and widget: open the
+panel, check reported brightness, move a device between rooms, rename its label,
+and confirm refresh failures are visible. Live Govee firmware behaviour and
+these desktop gestures require a real-device check.

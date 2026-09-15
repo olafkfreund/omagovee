@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["mcp==1.29.0"]
+# ///
+"""Local MCP adapter. Run with: uv run --script bin/omagovee-mcp"""
+import asyncio
+import json
+from pathlib import Path
+import sys
+from typing import Annotated
+
+from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import Field
+
+mcp = FastMCP("omagovee")
+CLI = Path(__file__).resolve().with_name("omarchy-govee")
+Target = Annotated[str, Field(min_length=1, description="Device MAC, room:<name>, or explicit all")]
+READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
+WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True)
+
+
+async def command(*args: str) -> CallToolResult:
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, str(CLI), "--json", *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.communicate()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        data = {"ok": False, "error": "Command timed out; some devices may have changed. Read state before retrying."}
+    else:
+        try:
+            data = json.loads(stdout)
+            if not isinstance(data, dict):
+                raise ValueError("Expected a JSON object")
+        except (ValueError, UnicodeError):
+            data = {"ok": False, "error": "Controller returned invalid JSON"}
+        if proc.returncode:
+            data["ok"] = False
+    return CallToolResult(content=[TextContent(type="text", text=json.dumps(data))],
+                          structuredContent=data, isError=not data.get("ok", True))
+
+
+@mcp.tool(annotations=READ)
+async def list_devices() -> CallToolResult:
+    """List device MACs, names, capabilities, rooms and labels without polling lights."""
+    return await command("list")
+
+
+@mcp.tool(annotations=READ)
+async def get_state(target: Target) -> CallToolResult:
+    """Read power, brightness, colour and reachability; cloud state may lag LAN writes."""
+    return await command("state", target)
+
+
+@mcp.tool(annotations=WRITE)
+async def set_power(target: Target, on: Annotated[bool, Field(strict=True)]) -> CallToolResult:
+    """Set explicit power. Unverified means accepted by cloud, not physically confirmed."""
+    return await command("on" if on else "off", target)
+
+
+@mcp.tool(annotations=WRITE)
+async def set_brightness(target: Target, percent: Annotated[int, Field(ge=0, le=100, strict=True)]) -> CallToolResult:
+    """Set brightness from 0 to 100. Does not implicitly turn the light on."""
+    return await command("brightness", str(percent), target)
+
+
+@mcp.tool(annotations=WRITE)
+async def set_color(target: Target, color: Annotated[str, Field(min_length=1)]) -> CallToolResult:
+    """Set RRGGBB, #RRGGBB, or a named colour. Does not implicitly turn lights on."""
+    return await command("color", color, target)
+
+
+@mcp.tool(annotations=READ)
+async def list_scenes() -> CallToolResult:
+    """List existing scene definitions, including their targets and requested values."""
+    return await command("scenes")
+
+
+@mcp.tool(annotations=WRITE)
+async def run_scene(name: Annotated[str, Field(min_length=1)]) -> CallToolResult:
+    """Validate and run an existing scene. Returns per-action results, including partial failures."""
+    return await command("scene", name)
+
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")

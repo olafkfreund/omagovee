@@ -119,7 +119,7 @@ def exits(fn):
         with contextlib.redirect_stdout(io.StringIO()), \
              contextlib.redirect_stderr(io.StringIO()):
             fn()
-    except SystemExit:
+    except (SystemExit, govee.GoveeError):
         return True
     return False
 
@@ -147,13 +147,13 @@ def test_load_rooms_repairs_duplicates():
 def test_rooms_shorthand_moves():
     with fresh_config({"hall": ["lvrt1"]}):
         run("rooms", "office", "lvrt1")
-        assert govee.read_json(govee.rooms_path()) == {"office": ["lvrt1"]}
+        assert govee.read_json(govee.rooms_path()) == {"office": ["Mlvrt1"]}
 
 
 def test_assign_ignores_repeats():
     with fresh_config():
         run("rooms", "assign", "a", "shelf1", "shelf1")
-        assert govee.read_json(govee.rooms_path()) == {"a": ["shelf1"]}
+        assert govee.read_json(govee.rooms_path()) == {"a": ["Mshelf1"]}
 
 
 def test_reserved_room_names_refused():
