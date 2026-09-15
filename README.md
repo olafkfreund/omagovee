@@ -20,7 +20,7 @@ else falls back to the cloud. No account of ours, no broker, no MQTT.
 | `bin/omarchy-govee` | The whole client — scan, list, on/off/toggle, brightness, colour |
 | `bin/omarchy-cmd-lights` | `gum` picker: device → action → value; for the menu row and the widget |
 | `plugin/` | Omarchy bar widget + dropdown panel: scenes, rooms, per-device toggle/brightness/colour |
-| `test_omagovee.py` | `python3 test_omagovee.py` — payload and colour logic |
+| `test_omagovee.py` | `python3 test_omagovee.py` — payload, colour and room logic |
 
 Python stdlib only. No `jq`, no `curl`, no pip install — a bar-widget click has
 to start fast.
@@ -162,21 +162,43 @@ when the label changes. A label is also accepted anywhere a device name is:
     omarchy-govee on "Desk Shelf"
     omarchy-govee label shelf1              # clears it
 
-Rooms hold each device exactly once — `rooms assign` removes it from whatever
-room it was in, because a device in two rooms fires twice for one `room:`
-command. `rooms rename` renames the key, so `room:` targets and any scene
-referring to the old name must be updated with it.
+Rooms hold each device exactly once — `rooms assign` (and its shorthand
+`rooms <room> <dev>...`) removes it from whatever room it was in, because a
+device in two rooms fires twice for one `room:` command. A `rooms.json` that
+already lists a device twice is read as if only its first room counted; the
+file is corrected the next time a room changes.
 
-In the panel: click a **device** name to open its label field, room chips,
-brightness and colours; click a **room** name to rename the room and set
-brightness or colour for everything in it at once.
+    omarchy-govee rooms assign office shelf1 shelf2   # creates office if new
+    omarchy-govee rooms office lvrt1                  # same thing
+    omarchy-govee rooms assign none shelf2            # out of every room
+
+There are no empty rooms: a room exists while it has a light, and is created
+by assigning its first one. `none`, `other` and `all` cannot be room names —
+they already mean "no room", the panel's unassigned heading and every device.
+
+`rooms rename` renames the key, so `room:` targets and any scene referring to
+the old name must be updated with it. Renaming onto a room that already
+exists is refused rather than silently dropping that room's lights.
+
+A device name has to pick one light. An exact name, MAC or label wins;
+otherwise a partial name is accepted only when it matches a single device,
+so `lvrt` is refused when there are `lvrt1` and `lvrt10` instead of moving
+whichever came first.
+
+In the panel: click a **device** name to open its label field, room chips, a
+**New room…** field, brightness and colours; click a **room** name to rename
+the room and set brightness or colour for everything in it at once. Type a
+name into **New room…** and press Enter to create that room with this light
+in it. Any command the panel runs that fails — a reserved room name, an
+offline light — raises a notification with the reason.
 
 
 ## Dragging devices between rooms
 
-Grab the ☰ handle at the left of a device row and drop it on a room heading.
-Room headings grow while a drag is in flight. Dropping on **other** takes the
-device out of every room.
+Grab the ☰ handle at the left of a device row and drop it anywhere on a
+room — its heading or its list of lights. Room headings grow while a drag is
+in flight. Dropping on **other** takes the device out of every room. To drag
+into a room that does not exist yet, create it first with **New room…**.
 
 Dragging and scrolling are the same gesture, so they get different territory:
 the 24px handle column drags, the rest of the row still flicks the list. The
