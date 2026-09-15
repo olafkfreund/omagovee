@@ -96,6 +96,96 @@ def test_assign_room_moves_rather_than_copies():
         assert rooms == {"keep": ["c"], "new": ["a"]}, rooms
 
 
+DEVS = [{"name": n, "mac": "M" + n, "sku": "H600C", "ip": None}
+        for n in ("lvrt1", "lvrt10", "shelf1")]
+
+
+def fresh_config(rooms=None):
+    """Temp config with a fixed device list, so room commands run without the
+    Govee API. Use as a context manager; the dir goes away on exit."""
+    import tempfile
+    tmp = tempfile.TemporaryDirectory()
+    govee.CONFIG = tmp.name
+    govee.devices = lambda: DEVS
+    if rooms is not None:
+        govee.write_json(govee.rooms_path(), rooms)
+    return tmp
+
+
+def exits(fn):
+    import contextlib
+    import io
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            fn()
+    except SystemExit:
+        return True
+    return False
+
+
+def run(*argv):
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        govee.main(list(argv))
+
+
+def rooms_on_disk():
+    return open(govee.rooms_path()).read()
+
+
+def test_load_rooms_repairs_duplicates():
+    """A device in two rooms (written by an older CLI) keeps its first room.
+    The repair is in memory: `dump` reads every minute and must not write."""
+    with fresh_config({"a": ["x", "y", "x"], "b": ["x"], "c": ["y"]}):
+        before = rooms_on_disk()
+        assert govee.load_rooms() == {"a": ["x", "y"]}, govee.load_rooms()
+        assert rooms_on_disk() == before
+
+
+def test_rooms_shorthand_moves():
+    with fresh_config({"hall": ["lvrt1"]}):
+        run("rooms", "office", "lvrt1")
+        assert govee.read_json(govee.rooms_path()) == {"office": ["lvrt1"]}
+
+
+def test_assign_ignores_repeats():
+    with fresh_config():
+        run("rooms", "assign", "a", "shelf1", "shelf1")
+        assert govee.read_json(govee.rooms_path()) == {"a": ["shelf1"]}
+
+
+def test_reserved_room_names_refused():
+    """none/other/all already mean something; a room with one of those names
+    cannot be targeted, and `other` would unassign on drop in the panel."""
+    with fresh_config({"a": ["lvrt1"]}):
+        before = rooms_on_disk()
+        for argv in (["rooms", "assign", "other", "shelf1"],
+                     ["rooms", "assign", "ALL", "shelf1"],
+                     ["rooms", "assign", "  ", "shelf1"],
+                     ["rooms", "rename", "a", "none"]):
+            assert exits(lambda: govee.main(argv)), argv
+        assert rooms_on_disk() == before
+
+
+def test_rename_onto_existing_refused():
+    """Renaming onto an existing room used to replace its members silently."""
+    with fresh_config({"a": ["lvrt1"], "b": ["shelf1"]}):
+        before = rooms_on_disk()
+        assert exits(lambda: govee.main(["rooms", "rename", "a", "b"]))
+        assert rooms_on_disk() == before
+
+
+def test_resolve_exact_beats_substring():
+    """`lvrt1` is a substring of `lvrt10`: first-match used to pick either."""
+    with fresh_config():
+        assert govee.resolve("lvrt1")["name"] == "lvrt1"
+        assert govee.resolve("LVRT10")["name"] == "lvrt10"
+        assert govee.resolve("shelf")["name"] == "shelf1"
+        assert exits(lambda: govee.resolve("lvrt"))
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

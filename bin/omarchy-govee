@@ -275,10 +275,23 @@ def resolve(name=None):
             return devs[0]
         die("Several devices — name one, or set a default:\n  %s"
             % "\n  ".join(d["name"] for d in devs))
+    want = name.strip().lower()
+    if not want:
+        die("Empty device name.")  # "" is a substring of every name
     labels = load_labels()
+    # Exact before substring: `lvrt1` is inside `lvrt10`, and taking the first
+    # substring hit moved whichever came first in the account list.
+    exact = [d for d in devs
+             if want in ((d["name"] or "").lower(), (d["mac"] or "").lower(),
+                         labels.get(d["name"], "").lower())]
+    if exact:
+        return exact[0]
     matches = [d for d in devs
-               if name.lower() in (d["name"] or "").lower() or name == d["mac"]
-               or name.lower() in labels.get(d["name"], "").lower()]
+               if want in (d["name"] or "").lower()
+               or want in labels.get(d["name"], "").lower()]
+    if len(matches) > 1:
+        die("%r matches several devices: %s — use the full name"
+            % (name, ", ".join(d["name"] for d in matches)))
     if not matches:
         die("No device matching %r. Known: %s"
             % (name, ", ".join(d["name"] for d in devs)))
@@ -291,8 +304,31 @@ def rooms_path():
     return os.path.join(CONFIG, "rooms.json")
 
 
+RESERVED_ROOMS = ("none", "other", "all")
+
+
+def check_room_name(name):
+    """`none` means no room, `other` is the panel's heading for unassigned
+    devices and `all` is a target keyword: a room with one of those names
+    could never be reached."""
+    name = name.strip()
+    if not name or name.lower() in RESERVED_ROOMS:
+        die("Not a usable room name: %r (reserved: %s)"
+            % (name, ", ".join(RESERVED_ROOMS)))
+    return name
+
+
 def load_rooms():
-    return read_json(rooms_path(), {}) or {}
+    """A device in two rooms (older CLIs could write that) keeps the first
+    room it appears in. Repaired in memory only: `dump` reads this every
+    minute from the bar and a read must never write the file."""
+    seen, rooms = set(), {}
+    for room, names in (read_json(rooms_path(), {}) or {}).items():
+        kept = [n for n in dict.fromkeys(names) if n not in seen]
+        seen.update(kept)
+        if kept:
+            rooms[room] = kept
+    return rooms
 
 
 def auto_rooms(devs):
@@ -357,6 +393,7 @@ def assign_room(room, names):
     """Move devices into `room`, or out of every room when room is 'none'.
     A device lives in one room: leaving it in two makes `room:` targets fire
     twice and the panel draw it twice."""
+    names = list(dict.fromkeys(names))
     rooms = load_rooms()
     for key in list(rooms):
         rooms[key] = [n for n in rooms[key] if n not in names]
@@ -624,27 +661,29 @@ def main(argv):
 
     if cmd == "rooms":
         current = load_rooms()
-        if args and args[0] == "assign":
-            if len(args) < 3:
-                die("usage: omarchy-govee rooms assign <room|none> <device>...")
-            current = assign_room(args[1],
-                                  [resolve(n)["name"] for n in args[2:]])
-        elif args and args[0] == "rename":
+        if args and args[0] == "rename":
             if len(args) != 3:
                 die("usage: omarchy-govee rooms rename <old> <new>")
             if args[1] not in current:
                 die("No room %r. Known: %s" % (args[1], ", ".join(current) or "none"))
-            current[args[2]] = current.pop(args[1])
+            new = check_room_name(args[2])
+            if new in current:
+                die("room %r already exists — move its lights with 'rooms assign'"
+                    % new)
+            current[new] = current.pop(args[1])
             write_json(rooms_path(), current)
         elif args and args[0] == "--auto":
             current = auto_rooms(devices())
             write_json(rooms_path(), current)
         elif args:
-            room, members = args[0], args[1:]
-            if not members:
-                die("usage: omarchy-govee rooms <room> <device>...")
-            current[room] = members
-            write_json(rooms_path(), current)
+            # `rooms <room> <dev>...` is `rooms assign`: it used to replace the
+            # member list without removing the devices from their old rooms.
+            target = args[1:] if args[0] == "assign" else args
+            if len(target) < 2:
+                die("usage: omarchy-govee rooms [assign] <room|none> <device>...")
+            # Name first, so a bad one fails before any device lookup hits the API.
+            room = target[0] if target[0] == "none" else check_room_name(target[0])
+            current = assign_room(room, [resolve(n)["name"] for n in target[1:]])
         for room, members in sorted(current.items()):
             print("%-12s %s" % (room, " ".join(members)))
         return 0
