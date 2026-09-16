@@ -86,3 +86,17 @@ Live follow-up completed on 2026-09-16:
 
 Real lamp writes, physical keyboard acceptance and moving the menu between
 monitors remain untested. Automated navigation and action tests use a fake CLI.
+
+
+Final visual refinement:
+
+- Removed Back/Reload buttons and boxed inputs/selection; retained one subtle
+  outer frame, plain rows, an arrow marker and themed icons.
+- Added Left/Right and Alt+Right navigation plus Ctrl+R reload. Right only opens
+  views/forms; device commands still require Enter or a click.
+- Increased text size/weight with sans-serif labels, retaining the shell font
+  for Nerd Font icons and the active Omarchy palette for device status.
+- Extended the QML check for forward/back shortcuts and safe arrow navigation.
+- Installed the refinements and restarted Quickshell to clear stale components.
+  A live screenshot confirmed the new typography, icons and removed buttons;
+  the user accepted the result.

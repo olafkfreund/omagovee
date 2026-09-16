@@ -97,9 +97,16 @@ Item {
       send(args)
     } catch (e) { failed = true; message = e.message }
   }
+  function forward() {
+    var row = rows[selected]
+    // Arrow navigation enters views/forms; only Enter executes device commands.
+    if (row && (row.target || row.view || row.form)) activate()
+  }
   function handleKey(event) {
     if (event.key === Qt.Key_Escape || (event.key === Qt.Key_Left && (event.modifiers & Qt.AltModifier))) back()
-    else if (event.key === Qt.Key_F5) client.refresh()
+    else if (event.key === Qt.Key_F5 || (event.key === Qt.Key_R && (event.modifiers & Qt.ControlModifier))) client.refresh()
+    else if (!form && event.key === Qt.Key_Right && ((event.modifiers & Qt.AltModifier) || !search.text)) forward()
+    else if (!form && event.key === Qt.Key_Left && !search.text) back()
     else if (!form && event.key === Qt.Key_Down) move(1)
     else if (!form && event.key === Qt.Key_Up) move(-1)
     else if (!form && event.key === Qt.Key_Backspace && !search.text) back()
@@ -147,12 +154,12 @@ Item {
     Rectangle {
       id: card
       anchors.centerIn: parent
-      width: Math.min(Style.space(540), panel.width - Style.gapsOut * 2)
-      height: Math.min(Style.space(620), panel.height - Style.gapsOut * 2)
+      width: Math.min(Style.space(620), panel.width - Style.gapsOut * 2)
+      height: Math.min(Style.space(580), panel.height - Style.gapsOut * 2)
       color: Color.menu.background
       border.color: Color.menu.border
-      border.width: Math.max(1, Style.space(2))
-      radius: Style.cornerRadius
+      border.width: 1
+      radius: Style.space(4)
       MouseArea { anchors.fill: parent }
 
       ColumnLayout {
@@ -165,23 +172,11 @@ Item {
           Text {
             text: root.heading
             color: Color.menu.text
-            font.family: Style.font.family
-            font.pixelSize: Style.font.title
+            font.family: "sans-serif"
+            font.pixelSize: Math.max(22, Style.font.title)
             font.bold: true
             elide: Text.ElideRight
             Layout.fillWidth: true
-          }
-          Controls.Button {
-            text: "Back"
-            focusPolicy: Qt.NoFocus
-            Accessible.name: "Go back or close"
-            onClicked: root.back()
-          }
-          Controls.Button {
-            text: "↻"
-            focusPolicy: Qt.NoFocus
-            Accessible.name: "Refresh lights"
-            onClicked: client.refresh()
           }
         }
 
@@ -192,10 +187,13 @@ Item {
           visible: !root.form
           placeholderText: "Type to filter…"
           color: Color.menu.text
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
+          font.family: "sans-serif"
+          font.pixelSize: Math.max(18, Style.font.body * 1.2)
           Accessible.name: "Filter lights and actions"
-          background: Rectangle { color: "transparent"; border.color: Color.menu.border; radius: Style.cornerRadius }
+          background: Item {}
+          placeholderTextColor: Color.menu.text
+          leftPadding: 0
+          rightPadding: 0
           onTextChanged: root.selected = 0
           onAccepted: root.activate()
           Keys.onPressed: function (event) { root.handleKey(event) }
@@ -206,10 +204,13 @@ Item {
           Layout.fillWidth: true
           visible: !!root.form
           color: Color.menu.text
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
+          font.family: "sans-serif"
+          font.pixelSize: Math.max(18, Style.font.body * 1.2)
           Accessible.name: root.heading
-          background: Rectangle { color: "transparent"; border.color: Color.menu.border; radius: Style.cornerRadius }
+          background: Item {}
+          placeholderTextColor: Color.menu.text
+          leftPadding: 0
+          rightPadding: 0
           onAccepted: root.submit()
           Keys.onPressed: function (event) { root.handleKey(event) }
         }
@@ -224,38 +225,59 @@ Item {
           currentIndex: root.selected
           spacing: Style.space(4)
           Controls.ScrollBar.vertical: Controls.ScrollBar {}
-          delegate: Rectangle {
+          delegate: Item {
             required property var modelData
             required property int index
             width: list.width
-            height: Style.space(62)
-            radius: Style.cornerRadius
-            color: root.selected === index ? Color.menu.selectedBackground : "transparent"
-            border.width: root.selected === index ? 1 : 0
-            border.color: Color.menu.selectedBorder
+            height: Math.max(64, Style.space(60))
             Accessible.role: Accessible.ListItem
             Accessible.name: modelData.label + " " + (modelData.detail || "")
             Accessible.selected: root.selected === index
             Accessible.onPressAction: { root.selected = index; root.activate() }
+            Text {
+              text: root.selected === index ? "›" : ""
+              color: Color.menu.text
+              font.pixelSize: Math.max(18, Style.font.body * 1.2)
+              anchors.top: parent.top
+              anchors.topMargin: Style.space(8)
+            }
+            Text {
+              text: Model.icon(modelData, root.view)
+              color: modelData.device
+                ? (modelData.device.online === false ? Color.urgent
+                  : modelData.device.online === true && modelData.device.power === 1 ? Color.accent : Color.muted)
+                : Color.accent
+              font.family: Style.font.family
+              font.pixelSize: Math.max(18, Style.font.body * 1.2)
+              anchors.left: parent.left
+              anchors.leftMargin: Style.space(18)
+              anchors.top: parent.top
+              anchors.topMargin: Style.space(8)
+              Accessible.ignored: true
+            }
             Column {
               anchors.fill: parent
-              anchors.margins: Style.space(8)
+              anchors.topMargin: Style.space(8)
+              anchors.leftMargin: Style.space(44)
               spacing: Style.space(3)
               Text {
                 width: parent.width
                 text: modelData.label
-                color: root.selected === index ? Color.menu.selectedText : Color.menu.text
-                font.family: Style.font.family
-                font.pixelSize: Style.font.body
+                font.weight: root.selected === index ? Font.Bold : Font.DemiBold
+                opacity: root.selected === index ? 1 : 0.85
+                color: root.selected === index ? Color.accent : Color.menu.text
+                font.family: "sans-serif"
+                font.pixelSize: Math.max(18, Style.font.body * 1.2)
                 elide: Text.ElideRight
               }
               Text {
                 width: parent.width
                 text: modelData.detail || ""
-                color: root.selected === index ? Color.menu.selectedText : Color.menu.text
-                opacity: 0.7
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
+                color: Color.menu.text
+                opacity: 0.9
+                font.family: "sans-serif"
+                font.pixelSize: Math.max(15, Style.font.caption * 1.2)
+                font.weight: Font.Medium
                 elide: Text.ElideRight
               }
             }
@@ -269,7 +291,7 @@ Item {
             visible: !root.rows.length
             text: client.loading ? "Loading lights…" : "No matches"
             color: Color.menu.text
-            font.family: Style.font.family
+            font.family: "sans-serif"
           }
         }
         Item { Layout.fillHeight: true; visible: !!root.form }
@@ -278,9 +300,9 @@ Item {
           visible: !!text
           text: client.error || root.message || (client.loading ? "Refreshing…" : "")
           color: Color.menu.text
-          font.bold: root.failed || !!client.error
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
+          font.family: "sans-serif"
+          font.pixelSize: Math.max(15, Style.font.caption * 1.2)
+          font.weight: root.failed || client.error ? Font.Bold : Font.Medium
           wrapMode: Text.Wrap
           maximumLineCount: 4
           elide: Text.ElideRight
@@ -288,11 +310,12 @@ Item {
         Text {
           Layout.fillWidth: true
           text: (client.busy ? "Working… · " : "") + (root.form ? "Enter save · Esc cancel"
-            : "↑↓ select · Enter choose · Esc back/close · F5 refresh")
+            : "↑↓ select · ← back · → open · Enter apply · Esc back/close · F5 reload")
           color: Color.menu.text
-          opacity: 0.7
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
+          opacity: 0.9
+          font.family: "sans-serif"
+          font.pixelSize: Math.max(15, Style.font.caption * 1.2)
+          font.weight: Font.Medium
           wrapMode: Text.Wrap
         }
       }

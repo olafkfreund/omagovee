@@ -87,3 +87,14 @@ function resultMessage(success, message) {
     }
     return success ? "Done" : "Command failed";
 }
+
+// Nerd Font glyphs use the same themed font as the Omarchy shell.
+function icon(row, view) {
+    if (row.kind === "device") return "\uf0eb";
+    if (row.kind === "all") return "\uf009";
+    if (row.kind === "room" || row.kind === "other" || view === "rooms") return "\uf015";
+    if (view === "scenes" || row.id === "scenes") return "\uf0d0";
+    if (view === "colors") return "\uf1fc";
+    return ({on: "\uf011", off: "\uf011", brightness: "\uf185", color: "\uf1fc",
+             label: "\uf040", rename: "\uf040", rooms: "\uf015"})[row.id] || "\uf105";
+}

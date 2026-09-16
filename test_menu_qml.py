@@ -78,8 +78,20 @@ ShellRoot {
           if (menu.rows.length < 4) return
           test.check(menu.opened, "menu did not open")
           menu.selected = menu.rows.findIndex(function(r) { return r.id === "AA:01" })
-          menu.activate()
+          var right = {key: Qt.Key_Right, modifiers: Qt.NoModifier, accepted: false}
+          menu.handleKey(right)
+          test.check(right.accepted, "right arrow handled")
           test.check(menu.view === "actions" && menu.target.target === "AA:01", "target navigation")
+          menu.selected = 0
+          menu.handleKey(right)
+          test.check(!test.find(menu, "goveeClient").busy, "right arrow must not send a power command")
+          var left = {key: Qt.Key_Left, modifiers: Qt.AltModifier, accepted: false}
+          menu.handleKey(left)
+          test.check(menu.view === "targets" && left.accepted, "alt-left back")
+          menu.selected = menu.rows.findIndex(function(r) { return r.id === "AA:01" })
+          right.modifiers = Qt.AltModifier
+          menu.handleKey(right)
+          test.check(menu.view === "actions", "alt-right opens target")
           menu.selected = 2
           menu.activate()
           test.check(menu.form === "brightness", "brightness form")

@@ -388,10 +388,18 @@ bindd = SUPER CTRL ALT, G, Govee lights, exec, omarchy-menu-lights
 Reload and check the configuration with `hyprctl reload` and
 `hyprctl configerrors`. The repository does not change your live keybindings.
 
+The menu uses flat, unboxed rows with larger sans-serif text, heavier labels,
+and Nerd Font icons. Back and reload controls are keyboard shortcuts. Device icons follow the active
+Omarchy theme: accent for on, muted for off/unknown, and urgent for offline.
+State text remains visible so colour is not the only indicator.
+
 ### Keyboard controls
 
 | Key | Action |
 |---|---|
+| Left / Right (empty filter) | Back / open selected submenu or editor |
+| Alt+Right | Open selected submenu or editor with a filter |
+| Ctrl+R | Reload device state |
 | Type | Filter the current list by name, ID or detail |
 | Up / Down | Select a row, wrapping at the ends |
 | Enter | Open the selected target/action, or save a form |
