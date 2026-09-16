@@ -8,7 +8,7 @@ import qs.Ui
 // per-device controls.
 //
 // All state comes from `omarchy-govee dump` (one JSON document, states fetched
-// concurrently ~1.2s for 15 devices) and every action shells back out to the
+// with concurrent cloud reads) and every action shells back out to the
 // same CLI. The panel deliberately holds no protocol knowledge: LAN vs cloud,
 // retries and read-back verification all live in the command, so the GUI and
 // the terminal can never disagree about what a light is doing.
@@ -29,11 +29,10 @@ BarWidget {
   property var roomNames: []     // room keys only, for the assign chips
   property var scenes: []
   property string expandedName: ""
-  property bool loading: false
-  property bool refreshPending: false
-  property string refreshError: ""
+  readonly property bool loading: client.loading
+  readonly property string refreshError: client.error
   property bool lit: false
-  property string busyName: ""
+  readonly property string busyName: client.busyName
   // PanelKeyCatcher eats plain keys before descendants see them; while a name
   // field is focused it has to stand down or "a" toggles a light mid-word.
   property int editors: 0
@@ -75,34 +74,17 @@ BarWidget {
 
   onOpenedChanged: if (opened) refresh()
 
-  function refresh() {
-    if (dumpProc.running) { refreshPending = true; return }
-    loading = true
-    dumpProc.running = true
-  }
+  function refresh() { client.refresh() }
+  function act(args, label) { client.act(args, label) }
 
-  // One Process can run one command. Clicking three rows quickly would
-  // otherwise overwrite the in-flight command and silently drop two of them,
-  // so actions queue and run in order.
-  property var queue: []
-
-  function act(args, label) {
-    queue.push({ args: args, label: label || "" })
-    pump()
-  }
-
-  function pump() {
-    if (actionProc.running || queue.length === 0) return
-    var job = queue.shift()
-    root.busyName = job.label
-    actionProc.command = ["omarchy-govee"].concat(job.args)
-    actionProc.running = true
-  }
-
-  function deviceByName(name) {
-    for (var i = 0; i < devices.length; i++)
-      if (devices[i].name === name) return devices[i]
-    return null
+  GoveeClient {
+    id: client
+    onSnapshotChanged: if (snapshot) root.applyDump(JSON.stringify(snapshot))
+    onCompleted: function (success, message) {
+      if (!success)
+        Quickshell.execDetached(["notify-send", "-u", "critical", "-a", "Omarchy",
+                                 "Govee failed", message || "Command failed"])
+    }
   }
 
   function applyDump(text) {
@@ -134,54 +116,10 @@ BarWidget {
     root.roomList = list
     root.roomNames = names
 
-    if (root.devices.some(function (d) { return !!d.error }))
-      root.refreshError = "Some lights could not be refreshed; state is unknown"
     var anyOn = false
     for (var m = 0; m < root.devices.length; m++)
       if (root.devices[m].power === 1) anyOn = true
     root.lit = anyOn
-  }
-
-  Process {
-    id: dumpProc
-    command: ["omarchy-govee", "dump"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        try { root.refreshError = ""; root.applyDump(text) }
-        catch (e) { root.refreshError = "Could not refresh lights; displayed state is stale" }
-        root.loading = false
-      }
-    }
-    stderr: StdioCollector { id: dumpErr; waitForEnd: true }
-    onExited: function (code) {
-      root.loading = false
-      if (code !== 0) root.refreshError = dumpErr.text.trim() || "Could not refresh lights"
-      if (root.refreshPending) {
-        root.refreshPending = false
-        Qt.callLater(root.refresh)
-      }
-    }
-  }
-
-  Process {
-    id: actionProc
-    stderr: StdioCollector { id: actionErr; waitForEnd: true }
-    onExited: function (code) {
-      // Read before pump(): the next queued command reuses this Process.
-      // Without this a refused command (a reserved room name, an offline
-      // light) just snaps back with no reason given.
-      var err = actionErr.text.trim()
-      if (code !== 0)
-        Quickshell.execDetached(["notify-send", "-u", "critical", "-a", "Omarchy",
-                                 "Govee failed", err || "omarchy-govee failed"])
-      root.busyName = ""
-      root.pump()
-      // Re-read rather than assume: a command can fail (offline device, a
-      // dropped LAN packet the CLI could not recover) and the panel must show
-      // what happened, not what was asked for.
-      if (root.queue.length === 0) root.refresh()
-    }
   }
 
   // One source of truth: the same dump the panel draws from also decides the

@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# omarchy:summary=Open the keyboard Govee lights menu
+# omarchy:args=[toggle|summon|close]
+set -euo pipefail
+case "${1:-toggle}" in
+  toggle|summon) exec omarchy-shell shell "${1:-toggle}" olafkfreund.govee '{}' ;;
+  close) exec omarchy-shell shell hide olafkfreund.govee ;;
+  -h|--help) echo 'Usage: omarchy-menu-lights [toggle|summon|close]' ;;
+  *) echo 'Usage: omarchy-menu-lights [toggle|summon|close]' >&2; exit 2 ;;
+esac

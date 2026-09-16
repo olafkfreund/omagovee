@@ -18,6 +18,7 @@ else falls back to the cloud. No account of ours, no broker, no MQTT.
 | Path | What |
 |---|---|
 | `bin/omarchy-govee` | The whole client — scan, list, on/off/toggle, brightness, colour |
+| `bin/omarchy-menu-lights` | Quickshell keyboard menu launcher for keybindings |
 | `bin/omarchy-cmd-lights` | `gum` picker: device → action → value; for the menu row and the widget |
 | `bin/omagovee-mcp` | Optional stdio MCP server for AI agents |
 | `plugin/` | Omarchy bar widget + dropdown panel: scenes, rooms, per-device toggle/brightness/colour |
@@ -348,3 +349,88 @@ Manual desktop check after installing the updated CLI and widget: open the
 panel, check reported brightness, move a device between rooms, rename its label,
 and confirm refresh failures are visible. Live Govee firmware behaviour and
 these desktop gestures require a real-device check.
+
+## Keyboard pop-out menu
+
+The plugin includes a separate, searchable Quickshell menu alongside the bar
+panel. It runs in the existing Omarchy shell and also works when its bar widget
+is not placed in the bar. Enable the plugin and install `bin/omarchy-menu-lights`
+with the other CLI scripts. Keep all files from `plugin/` together when updating.
+
+```bash
+omarchy-menu-lights          # toggle keyboard menu
+omarchy-menu-lights summon   # always open
+omarchy-menu-lights close
+# Equivalent direct shell route:
+omarchy-shell shell toggle olafkfreund.govee '{}'
+```
+
+The direct shell route can also be used in keybindings without installing the
+launcher script. If new QML files fail to load after updating, restart the shell
+with `omarchy restart shell` and allow its plugins to finish loading.
+
+The IPC route now opens the keyboard menu; clicking the bar icon still opens
+the existing mouse panel. No second Quickshell process is started.
+
+Suggested Hyprland Lua binding in `~/.config/hypr/bindings.lua` (check that this
+combination is free before adding it):
+
+```lua
+o.bind("SUPER + CTRL + ALT + G", "Govee lights", "omarchy-menu-lights")
+```
+
+For older Hyprland configurations using `.conf`:
+
+```ini
+bindd = SUPER CTRL ALT, G, Govee lights, exec, omarchy-menu-lights
+```
+
+Reload and check the configuration with `hyprctl reload` and
+`hyprctl configerrors`. The repository does not change your live keybindings.
+
+### Keyboard controls
+
+| Key | Action |
+|---|---|
+| Type | Filter the current list by name, ID or detail |
+| Up / Down | Select a row, wrapping at the ends |
+| Enter | Open the selected target/action, or save a form |
+| Escape | Cancel a form, clear the filter, go back, then close at the top |
+| Alt+Left | Same back action |
+| Backspace with an empty filter | Go back |
+| F5 | Refresh device state |
+
+Select **All devices**, a room, **Unassigned devices**, or an individual light.
+Each target offers explicit on/off, brightness from 0–100, named colours and
+custom six-digit RGB. **Scenes** lists existing scenes. Individual lights also
+have friendly-name editing and room assignment, including **No room** and
+**New room**. Room actions include rename. Renaming a room still requires
+updating scenes that use its old name.
+
+State, busy messages, validation errors and partial command failures are shown
+in the menu. Cloud acceptance is identified as unverified. Actions queue in
+order and continue if the menu is dismissed; opening it again refreshes state.
+The menu retains its component while closed but does not poll in the background.
+The shared `GoveeClient.qml` runs the same controller for both views.
+
+### Menu development checks
+
+The research and implementation plan is in
+[plan/2026-09-16-keyboard-menu.md](plan/2026-09-16-keyboard-menu.md).
+It follows the [Omarchy plugin guide](https://plugins.omarchy.org/develop.html)
+and the installed shell's combined menu/bar-widget lifecycle.
+
+```bash
+omarchy plugin validate ./plugin
+node test_menu_model.js
+python3 test_menu_qml.py
+```
+
+The model test uses Node's standard library. The QML test requires the installed
+Omarchy shell (`OMARCHY_PATH`), Quickshell and Xvfb; it opens an isolated virtual
+display and substitutes a fake CLI. The test copy omits Wayland-only surface
+hints, which X11 cannot instantiate; application logic is unchanged. It does
+not change real lights or load a
+second shell on your desktop. Wayland focus, monitor placement, outside-click
+dismissal, keybinding activation and shell plugin reload still need a manual
+check in the actual desktop after installation.

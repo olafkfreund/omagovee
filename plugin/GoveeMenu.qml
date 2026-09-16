@@ -1,0 +1,301 @@
+import QtQuick
+import QtQuick.Controls as Controls
+import QtQuick.Layouts
+import Quickshell
+import Quickshell.Wayland
+import Quickshell.Hyprland
+import qs.Commons
+import "GoveeMenuModel.js" as Model
+
+Item {
+  id: root
+  property var shell: null
+  property var manifest: null
+  property bool opened: false
+  property string view: "targets"
+  property var target: null
+  property string form: ""
+  property string message: ""
+  property bool failed: false
+  property int selected: 0
+  readonly property var rows: Model.filter(Model.rows(view, client.snapshot, target), search.text)
+  readonly property string heading: form ? ({ brightness: "Brightness (0–100)", color: "Custom RGB colour",
+      label: "Friendly name (empty clears)", newroom: "New room", rename: "Rename room" })[form]
+    : view === "targets" ? "Govee lights" : view === "scenes" ? "Scenes"
+    : (target ? target.label : "Lights") + (view === "colors" ? " · Colour" : view === "rooms" ? " · Move to room" : "")
+
+  function open(payloadJson) {
+    var monitor = Hyprland.focusedMonitor
+    var screens = Quickshell.screens
+    panel.screen = screens.find(function (s) { return monitor && s.name === monitor.name }) || screens[0] || null
+    view = "targets"
+    target = null
+    form = ""
+    search.text = ""
+    message = ""
+    selected = 0
+    opened = true
+    client.refresh()
+    focusInput()
+  }
+
+  function close() { opened = false }
+  function dismiss() {
+    if (shell) shell.hide(manifest ? manifest.id : "olafkfreund.govee")
+    else close()
+  }
+  function focusInput() {
+    Qt.callLater(function () {
+      if (root.opened) (root.form ? editor : search).forceActiveFocus()
+    })
+  }
+  function navigate(next) {
+    view = next
+    form = ""
+    search.text = ""
+    selected = 0
+    focusInput()
+  }
+  function back() {
+    if (form) { form = ""; focusInput() }
+    else if (search.text) search.text = ""
+    else if (view === "targets") dismiss()
+    else navigate(view === "colors" || view === "rooms" ? "actions" : "targets")
+  }
+  function move(delta) {
+    if (!rows.length) return
+    selected = (selected + delta + rows.length) % rows.length
+    list.positionViewAtIndex(selected, ListView.Contain)
+  }
+  function activate() {
+    var row = rows[selected]
+    if (!row) return
+    if (row.target) { target = row; navigate("actions") }
+    else if (row.form) {
+      form = row.form
+      editor.text = form === "brightness" && target.device && typeof target.device.brightness === "number"
+        ? String(target.device.brightness) : form === "label" ? target.device.label || ""
+        : form === "rename" ? target.label : ""
+      message = ""
+      focusInput()
+    } else if (row.view) navigate(row.view)
+    else if (row.args) send(row.args)
+  }
+  function send(args) {
+    message = "Queued…"
+    failed = false
+    client.act(args, target ? target.target : "scene")
+  }
+  function submit() {
+    try {
+      var args = Model.formCommand(form, editor.text, target)
+      if (form === "rename") {
+        // Return to the target list: the old room ID no longer resolves.
+        navigate("targets")
+        target = null
+      } else { form = ""; focusInput() }
+      send(args)
+    } catch (e) { failed = true; message = e.message }
+  }
+  function handleKey(event) {
+    if (event.key === Qt.Key_Escape || (event.key === Qt.Key_Left && (event.modifiers & Qt.AltModifier))) back()
+    else if (event.key === Qt.Key_F5) client.refresh()
+    else if (!form && event.key === Qt.Key_Down) move(1)
+    else if (!form && event.key === Qt.Key_Up) move(-1)
+    else if (!form && event.key === Qt.Key_Backspace && !search.text) back()
+    else return
+    event.accepted = true
+  }
+  onRowsChanged: selected = Math.max(0, Math.min(selected, rows.length - 1))
+
+  GoveeClient {
+    id: client
+    objectName: "goveeClient"
+    onCompleted: function (success, output) {
+      root.failed = !success
+      root.message = Model.resultMessage(success, output)
+    }
+    onSnapshotChanged: {
+      // Refresh state without changing the selected device identity.
+      if (root.target && root.target.kind === "device") {
+        var updated = Model.targets(snapshot).find(function (r) { return r.id === root.target.id })
+        if (updated) root.target = updated
+      }
+    }
+  }
+  Timer {
+    interval: 60000
+    running: root.opened && !root.form && !client.busy
+    repeat: true
+    onTriggered: client.refresh()
+  }
+
+  PanelWindow {
+    id: panel
+    visible: root.opened
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.namespace: "omagovee-menu"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: root.opened ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
+    onBackingWindowVisibleChanged: if (backingWindowVisible) root.focusInput()
+
+    Rectangle { anchors.fill: parent; color: Color.menu.scrim }
+    MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
+
+    Rectangle {
+      id: card
+      anchors.centerIn: parent
+      width: Math.min(Style.space(540), panel.width - Style.gapsOut * 2)
+      height: Math.min(Style.space(620), panel.height - Style.gapsOut * 2)
+      color: Color.menu.background
+      border.color: Color.menu.border
+      border.width: Math.max(1, Style.space(2))
+      radius: Style.cornerRadius
+      MouseArea { anchors.fill: parent }
+
+      ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: Style.space(18)
+        spacing: Style.space(10)
+
+        RowLayout {
+          Layout.fillWidth: true
+          Text {
+            text: root.heading
+            color: Color.menu.text
+            font.family: Style.font.family
+            font.pixelSize: Style.font.title
+            font.bold: true
+            elide: Text.ElideRight
+            Layout.fillWidth: true
+          }
+          Controls.Button {
+            text: "Back"
+            focusPolicy: Qt.NoFocus
+            Accessible.name: "Go back or close"
+            onClicked: root.back()
+          }
+          Controls.Button {
+            text: "↻"
+            focusPolicy: Qt.NoFocus
+            Accessible.name: "Refresh lights"
+            onClicked: client.refresh()
+          }
+        }
+
+        Controls.TextField {
+          id: search
+          objectName: "search"
+          Layout.fillWidth: true
+          visible: !root.form
+          placeholderText: "Type to filter…"
+          color: Color.menu.text
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+          Accessible.name: "Filter lights and actions"
+          background: Rectangle { color: "transparent"; border.color: Color.menu.border; radius: Style.cornerRadius }
+          onTextChanged: root.selected = 0
+          onAccepted: root.activate()
+          Keys.onPressed: function (event) { root.handleKey(event) }
+        }
+        Controls.TextField {
+          id: editor
+          objectName: "editor"
+          Layout.fillWidth: true
+          visible: !!root.form
+          color: Color.menu.text
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+          Accessible.name: root.heading
+          background: Rectangle { color: "transparent"; border.color: Color.menu.border; radius: Style.cornerRadius }
+          onAccepted: root.submit()
+          Keys.onPressed: function (event) { root.handleKey(event) }
+        }
+
+        ListView {
+          id: list
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          visible: !root.form
+          clip: true
+          model: root.rows
+          currentIndex: root.selected
+          spacing: Style.space(4)
+          Controls.ScrollBar.vertical: Controls.ScrollBar {}
+          delegate: Rectangle {
+            required property var modelData
+            required property int index
+            width: list.width
+            height: Style.space(62)
+            radius: Style.cornerRadius
+            color: root.selected === index ? Color.menu.selectedBackground : "transparent"
+            border.width: root.selected === index ? 1 : 0
+            border.color: Color.menu.selectedBorder
+            Accessible.role: Accessible.ListItem
+            Accessible.name: modelData.label + " " + (modelData.detail || "")
+            Accessible.selected: root.selected === index
+            Accessible.onPressAction: { root.selected = index; root.activate() }
+            Column {
+              anchors.fill: parent
+              anchors.margins: Style.space(8)
+              spacing: Style.space(3)
+              Text {
+                width: parent.width
+                text: modelData.label
+                color: root.selected === index ? Color.menu.selectedText : Color.menu.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                text: modelData.detail || ""
+                color: root.selected === index ? Color.menu.selectedText : Color.menu.text
+                opacity: 0.7
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
+            }
+            MouseArea {
+              anchors.fill: parent
+              onClicked: { root.selected = parent.index; root.activate(); root.focusInput() }
+            }
+          }
+          Text {
+            anchors.centerIn: parent
+            visible: !root.rows.length
+            text: client.loading ? "Loading lights…" : "No matches"
+            color: Color.menu.text
+            font.family: Style.font.family
+          }
+        }
+        Item { Layout.fillHeight: true; visible: !!root.form }
+        Text {
+          Layout.fillWidth: true
+          visible: !!text
+          text: client.error || root.message || (client.loading ? "Refreshing…" : "")
+          color: Color.menu.text
+          font.bold: root.failed || !!client.error
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+          maximumLineCount: 4
+          elide: Text.ElideRight
+        }
+        Text {
+          Layout.fillWidth: true
+          text: (client.busy ? "Working… · " : "") + (root.form ? "Enter save · Esc cancel"
+            : "↑↓ select · Enter choose · Esc back/close · F5 refresh")
+          color: Color.menu.text
+          opacity: 0.7
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.Wrap
+        }
+      }
+    }
+  }
+}
