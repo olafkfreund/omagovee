@@ -62,10 +62,12 @@ BarWidget {
   // "60% · LAN": state first, then the transport when the read reported one.
   function subtitle(dev) {
     var parts = []
-    if (dev.power === 1)
+    if (dev.online === false)
+      parts.push("offline")
+    else if (dev.power === 1)
       parts.push(typeof dev.brightness === "number" ? dev.brightness + "%" : "on")
     else
-      parts.push(dev.online === false ? "offline" : "off")
+      parts.push(dev.online === true ? "off" : "unknown")
     if (dev.transport) parts.push(dev.transport === "lan" ? "LAN" : "cloud")
     return parts.join(" · ")
   }
@@ -203,6 +205,8 @@ BarWidget {
     MouseArea {
       id: hueMouse
       anchors.fill: parent
+      // Inside a Flickable: without this a drag with vertical jitter is stolen.
+      preventStealing: true
       cursorShape: Qt.PointingHandCursor
       onReleased: function(mouse) { strip.picked(strip.colorAt(mouse.x)) }
     }
@@ -356,9 +360,9 @@ BarWidget {
               readonly property var room: modelData
               readonly property bool editing: root.expandedName === "room:" + room.name
               readonly property bool isOther: room.name === "other"
-              readonly property var lit: room.members.filter(function (d) { return d.power === 1 })
-              readonly property int onMembers: lit.length
-              readonly property var firstOn: lit.length ? lit[0] : null
+              readonly property var onList: room.members.filter(function (d) { return d.power === 1 })
+              readonly property int onMembers: onList.length
+              readonly property var firstOn: onList.length ? onList[0] : null
               readonly property var levels: room.members.map(function (d) { return d.brightness })
                 .filter(function (v) { return typeof v === "number" })
               readonly property int avg: levels.length
@@ -377,7 +381,7 @@ BarWidget {
                   // Grows during a drag: a one-line header is a miserable thing
                   // to aim at.
                   implicitHeight: (roomItem.isOther
-                      ? roomHeader.implicitHeight : cardCol.implicitHeight + Style.space(16))
+                      ? roomHeader.implicitHeight : roomCardCol.implicitHeight + Style.space(16))
                     + (root.dragName !== "" ? Style.space(14) : 0)
 
                   // "other" is not a room: plain heading, no card, no switch.
@@ -403,7 +407,7 @@ BarWidget {
                     color: root.surface
 
                     Column {
-                      id: cardCol
+                      id: roomCardCol
                       anchors.left: parent.left
                       anchors.right: parent.right
                       anchors.verticalCenter: parent.verticalCenter
@@ -412,7 +416,7 @@ BarWidget {
 
                       Item {
                         width: parent.width
-                        implicitHeight: Math.max(titleCol.implicitHeight, roomSw.implicitHeight)
+                        implicitHeight: Math.max(roomTitleCol.implicitHeight, roomSw.implicitHeight)
 
                         Rectangle {
                           id: roomDot
@@ -427,7 +431,7 @@ BarWidget {
                         }
 
                         Column {
-                          id: titleCol
+                          id: roomTitleCol
                           anchors.left: roomDot.right
                           anchors.leftMargin: Style.space(8)
                           anchors.right: roomSw.left
@@ -445,7 +449,7 @@ BarWidget {
                           Text {
                             width: parent.width
                             text: roomItem.onMembers + " of " + roomItem.room.members.length + " on"
-                              + (roomItem.levels.length ? " · " + roomItem.avg + "%" : "")
+                              + (roomItem.onMembers > 0 && roomItem.levels.length ? " · " + roomItem.avg + "%" : "")
                               + (roomItem.editing ? "  ▴" : "  ▾")
                             color: root.dim
                             font.family: root.fontFamily
@@ -733,7 +737,7 @@ BarWidget {
                           }
 
                           PanelSlider {
-                            visible: devItem.dev.power === 1 && devItem.dev.online
+                            visible: devItem.dev.power === 1 && devItem.dev.online === true
                               && typeof devItem.dev.brightness === "number"
                             width: parent.width
                             bar: root.bar

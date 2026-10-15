@@ -228,3 +228,14 @@ automated test for `Govee.qml`. Steps 7 and 8 are the check.
 Steps 1-6 edit files, so the `coder` agent implements them, one agent with
 the steps sent in order. A fresh Opus agent reviews `git diff main` against
 this plan. Steps 7-8 need the live desktop and stay with the session.
+
+## Deviations from review (Opus review of steps 1-6)
+
+- `subtitle()` shows `unknown` when `online` is null (main showed
+  "(unknown)"; the plan had dropped that case).
+- Device slider uses `online === true` so a null never reaches `visible`.
+- Room subtitle shows ` · avg%` only while a member is on.
+- `HueStrip` MouseArea gets `preventStealing: true` (differs from upstream):
+  inside the Flickable a drag-to-pick was otherwise stolen.
+- Room-scope ids renamed `roomCardCol`/`roomTitleCol`, and `roomItem.lit`
+  renamed `onList`, so they no longer shadow the device and root names.
