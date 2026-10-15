@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: none
 spec: spec/2026-10-15-panel-cards.md
 ---
