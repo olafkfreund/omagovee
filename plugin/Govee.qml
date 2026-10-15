@@ -46,6 +46,30 @@ BarWidget {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  // Tokens from eldtechnologies/omarchy-plugin-govee Panel.qml (MIT).
+  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property color surface: Util.alpha(foreground, 0.05)
+  property int onLights: 0
+
+  // Swatch colour of a light; transparent when it is off or has no reading.
+  function dotColor(dev) {
+    if (dev.power !== 1 || !dev.color) return "transparent"
+    return Qt.rgba(dev.color.r / 255, dev.color.g / 255, dev.color.b / 255, 1)
+  }
+
+  // "60% · LAN": state first, then the transport when the read reported one.
+  function subtitle(dev) {
+    var parts = []
+    if (dev.power === 1)
+      parts.push(typeof dev.brightness === "number" ? dev.brightness + "%" : "on")
+    else
+      parts.push(dev.online === false ? "offline" : "off")
+    if (dev.transport) parts.push(dev.transport === "lan" ? "LAN" : "cloud")
+    return parts.join(" · ")
+  }
+
   // nf-md glyphs per device kind; `kind` comes from the CLI, which is the one
   // place that knows how to read a Govee SKU.
   readonly property var kindIcons: {
@@ -116,10 +140,11 @@ BarWidget {
     root.roomList = list
     root.roomNames = names
 
-    var anyOn = false
+    var onCount = 0
     for (var m = 0; m < root.devices.length; m++)
-      if (root.devices[m].power === 1) anyOn = true
-    root.lit = anyOn
+      if (root.devices[m].power === 1) onCount++
+    root.lit = onCount > 0
+    root.onLights = onCount
   }
 
   // One source of truth: the same dump the panel draws from also decides the
@@ -184,7 +209,7 @@ BarWidget {
           // ---------- scenes ----------
           PanelSectionHeader {
             text: root.loading ? "Scenes · refreshing…" : "Scenes"
-            foreground: root.bar ? root.bar.foreground : Color.foreground
+            foreground: root.foreground
           }
 
           Flow {
@@ -197,10 +222,10 @@ BarWidget {
                 required property string modelData
                 radius: Style.cornerRadius
                 color: sceneMouse.containsMouse
-                  ? Style.selectedFillFor(root.bar.foreground, Color.accent)
+                  ? Style.selectedFillFor(root.foreground, Color.accent)
                   : "transparent"
                 border.width: 1
-                border.color: Style.selectedFillFor(root.bar.foreground, Color.accent)
+                border.color: Style.selectedFillFor(root.foreground, Color.accent)
                 implicitWidth: sceneLabel.implicitWidth + Style.space(16)
                 implicitHeight: sceneLabel.implicitHeight + Style.space(8)
 
@@ -208,8 +233,8 @@ BarWidget {
                   id: sceneLabel
                   anchors.centerIn: parent
                   text: parent.modelData
-                  color: root.bar ? root.bar.foreground : Color.foreground
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  color: root.foreground
+                  font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
 
@@ -258,7 +283,7 @@ BarWidget {
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
                     text: roomItem.room.name
-                    foreground: root.bar ? root.bar.foreground : Color.foreground
+                    foreground: root.foreground
 
                     MouseArea {
                       anchors.fill: parent
@@ -275,13 +300,13 @@ BarWidget {
                     PanelActionButton {
                       iconText: "\uf011"
                       tooltipText: "All off"
-                      foreground: root.bar ? root.bar.foreground : Color.foreground
+                      foreground: root.foreground
                       onClicked: root.act(["off", "room:" + roomItem.room.name], "")
                     }
                     PanelActionButton {
                       iconText: "\uf0eb"
                       tooltipText: "All on"
-                      foreground: root.bar ? root.bar.foreground : Color.foreground
+                      foreground: root.foreground
                       onClicked: root.act(["on", "room:" + roomItem.room.name], "")
                     }
                   }
@@ -299,7 +324,7 @@ BarWidget {
                     text: roomItem.room.name
                     placeholderText: "Room name"
                     verticalPadding: Style.space(3)
-                    foreground: root.bar ? root.bar.foreground : Color.foreground
+                    foreground: root.foreground
                     enabled: roomItem.room.name !== "other"
                     onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
                     onAccepted: {
@@ -342,7 +367,7 @@ BarWidget {
                         radius: Style.cornerRadius > 0 ? width / 2 : 0
                         color: modelData.rgb
                         border.width: roomSwatch.containsMouse ? 2 : 1
-                        border.color: root.bar ? root.bar.foreground : Color.foreground
+                        border.color: root.foreground
 
                         MouseArea {
                           id: roomSwatch
@@ -447,10 +472,10 @@ BarWidget {
                           Text {
                             anchors.centerIn: parent
                             text: "\u2630"
-                            color: root.bar ? root.bar.foreground : Color.foreground
+                            color: root.foreground
                             opacity: dragArea.containsMouse || dragArea.drag.active
                               ? 0.9 : 0.3
-                            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                            font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
                           }
                         }
@@ -461,9 +486,9 @@ BarWidget {
                           anchors.leftMargin: Style.space(6)
                           anchors.verticalCenter: parent.verticalCenter
                           text: root.kindIcon(devItem.dev.kind)
-                          color: root.bar ? root.bar.foreground : Color.foreground
+                          color: root.foreground
                           opacity: devItem.dev.online ? 0.85 : 0.35
-                          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                          font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
                         }
 
@@ -475,9 +500,9 @@ BarWidget {
                           text: (devItem.dev.label || devItem.dev.name)
                             + (devItem.dev.online === true ? "" : devItem.dev.online === false ? "  (offline)" : "  (unknown)")
                             + (devItem.dev.ip ? "  ·  lan" : "")
-                          color: root.bar ? root.bar.foreground : Color.foreground
+                          color: root.foreground
                           opacity: devItem.dev.online ? 1.0 : 0.45
-                          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                          font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
 
                           MouseArea {
@@ -494,7 +519,7 @@ BarWidget {
                           checked: devItem.dev.power === 1
                           interactive: devItem.dev.online
                           busy: root.busyName === devItem.dev.mac
-                          foreground: root.bar ? root.bar.foreground : Color.foreground
+                          foreground: root.foreground
                           onToggled: root.act([checked ? "off" : "on", devItem.dev.mac],
                                               devItem.dev.mac)
                         }
@@ -515,7 +540,7 @@ BarWidget {
                         // changes what the panel calls it. Empty clears it.
                         placeholderText: "Friendly name for " + devItem.dev.name
                         verticalPadding: Style.space(3)
-                        foreground: root.bar ? root.bar.foreground : Color.foreground
+                        foreground: root.foreground
                         onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
                         onAccepted: {
                           root.act(["label", devItem.dev.mac].concat(
@@ -536,10 +561,10 @@ BarWidget {
                               modelData === roomItem.room.name
                             radius: Style.cornerRadius
                             color: current || chipMouse.containsMouse
-                              ? Style.selectedFillFor(root.bar.foreground, Color.accent)
+                              ? Style.selectedFillFor(root.foreground, Color.accent)
                               : "transparent"
                             border.width: 1
-                            border.color: Style.selectedFillFor(root.bar.foreground,
+                            border.color: Style.selectedFillFor(root.foreground,
                                                                 Color.accent)
                             implicitWidth: chipLabel.implicitWidth + Style.space(12)
                             implicitHeight: chipLabel.implicitHeight + Style.space(6)
@@ -548,8 +573,8 @@ BarWidget {
                               id: chipLabel
                               anchors.centerIn: parent
                               text: parent.modelData
-                              color: root.bar ? root.bar.foreground : Color.foreground
-                              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                              color: root.foreground
+                              font.family: root.fontFamily
                               font.pixelSize: Style.font.caption
                             }
 
@@ -571,7 +596,7 @@ BarWidget {
                         width: parent.width
                         placeholderText: "New room…"
                         verticalPadding: Style.space(3)
-                        foreground: root.bar ? root.bar.foreground : Color.foreground
+                        foreground: root.foreground
                         onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
                         onAccepted: {
                           var name = text.trim()
@@ -611,7 +636,7 @@ BarWidget {
                             radius: Style.cornerRadius > 0 ? width / 2 : 0
                             color: modelData.rgb
                             border.width: swatchMouse.containsMouse ? 2 : 1
-                            border.color: root.bar ? root.bar.foreground : Color.foreground
+                            border.color: root.foreground
 
                             MouseArea {
                               id: swatchMouse
@@ -653,7 +678,7 @@ BarWidget {
                 radius: Style.cornerRadius
                 color: "transparent"
                 border.width: 1
-                border.color: Style.selectedFillFor(root.bar.foreground, Color.accent)
+                border.color: Style.selectedFillFor(root.foreground, Color.accent)
               }
             }
           }
