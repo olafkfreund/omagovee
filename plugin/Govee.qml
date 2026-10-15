@@ -160,6 +160,67 @@ BarWidget {
     onTriggered: if (root.editors === 0 && !root.dragName) root.refresh()
   }
 
+  // From eldtechnologies/omarchy-plugin-govee Panel.qml (MIT).
+  component ActionButton: Button {
+    property string label: ""
+    property bool outlined: false
+    signal triggered()
+
+    text: label
+    bordered: outlined
+    foreground: root.foreground
+    accent: Color.accent
+    fontFamily: root.fontFamily
+    fontSize: Style.font.bodySmall
+    opacity: enabled ? 1 : 0.4
+    onClicked: if (enabled) triggered()
+  }
+
+  // From eldtechnologies/omarchy-plugin-govee Panel.qml (MIT).
+  // A rainbow strip: click or drag to pick a saturated colour.
+  component HueStrip: Item {
+    id: strip
+    signal picked(string hex)
+    implicitHeight: Style.space(20)
+
+    function colorAt(x) {
+      return String(Qt.hsva(Math.max(0, Math.min(0.999, x / width)), 1, 1, 1))
+    }
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Math.min(Style.cornerRadius, height / 2)
+      gradient: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0.0; color: "#ff0000" }
+        GradientStop { position: 0.17; color: "#ffff00" }
+        GradientStop { position: 0.33; color: "#00ff00" }
+        GradientStop { position: 0.5; color: "#00ffff" }
+        GradientStop { position: 0.67; color: "#0000ff" }
+        GradientStop { position: 0.83; color: "#ff00ff" }
+        GradientStop { position: 1.0; color: "#ff0000" }
+      }
+    }
+
+    Rectangle {
+      id: marker
+      visible: hueMouse.pressed
+      width: Style.space(4)
+      height: parent.height + Style.space(4)
+      anchors.verticalCenter: parent.verticalCenter
+      x: Math.max(0, Math.min(parent.width - width, hueMouse.mouseX - width / 2))
+      color: root.foreground
+      radius: width / 2
+    }
+
+    MouseArea {
+      id: hueMouse
+      anchors.fill: parent
+      cursorShape: Qt.PointingHandCursor
+      onReleased: function(mouse) { strip.picked(strip.colorAt(mouse.x)) }
+    }
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
