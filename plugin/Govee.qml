@@ -526,16 +526,18 @@ BarWidget {
                       model: root.swatches
                       delegate: Rectangle {
                         required property var modelData
-                        width: Style.space(20)
-                        height: Style.space(20)
-                        radius: Style.cornerRadius > 0 ? width / 2 : 0
+                        width: Style.space(26)
+                        height: Style.space(26)
+                        radius: width / 2
                         color: modelData.rgb
                         border.width: roomSwatch.containsMouse ? 2 : 1
-                        border.color: root.foreground
+                        border.color: roomSwatch.containsMouse
+                          ? root.foreground : Util.alpha(root.foreground, 0.25)
 
                         MouseArea {
                           id: roomSwatch
                           anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
                           hoverEnabled: true
                           onClicked: root.act(["color", parent.modelData.name,
                                                "room:" + roomItem.room.name], "")
@@ -838,21 +840,30 @@ BarWidget {
                           model: root.swatches
                           delegate: Rectangle {
                             required property var modelData
-                            width: Style.space(20)
-                            height: Style.space(20)
-                            radius: Style.cornerRadius > 0 ? width / 2 : 0
+                            width: Style.space(26)
+                            height: Style.space(26)
+                            radius: width / 2
                             color: modelData.rgb
                             border.width: swatchMouse.containsMouse ? 2 : 1
-                            border.color: root.foreground
+                            border.color: swatchMouse.containsMouse
+                              ? root.foreground : Util.alpha(root.foreground, 0.25)
 
                             MouseArea {
                               id: swatchMouse
                               anchors.fill: parent
+                              cursorShape: Qt.PointingHandCursor
                               hoverEnabled: true
                               onClicked: root.act(["color", parent.modelData.name,
                                                    devItem.dev.mac], devItem.dev.mac)
                             }
                           }
+                        }
+                      }
+
+                      HueStrip {
+                        width: parent.width
+                        onPicked: function (hex) {
+                          root.act(["color", hex, devItem.dev.mac], devItem.dev.mac)
                         }
                       }
                     }
