@@ -368,6 +368,14 @@ BarWidget {
               required property var modelData
               readonly property var room: modelData
               readonly property bool editing: root.expandedName === "room:" + room.name
+              readonly property bool isOther: room.name === "other"
+              readonly property var lit: room.members.filter(function (d) { return d.power === 1 })
+              readonly property int onMembers: lit.length
+              readonly property var firstOn: lit.length ? lit[0] : null
+              readonly property var levels: room.members.map(function (d) { return d.brightness })
+                .filter(function (v) { return typeof v === "number" })
+              readonly property int avg: levels.length
+                ? Math.round(levels.reduce(function (a, b) { return a + b }, 0) / levels.length) : 0
               width: column.width
               implicitHeight: roomCol.implicitHeight
               z: root.dragRoom === room.name ? 100 : 0
@@ -381,11 +389,14 @@ BarWidget {
                   width: parent.width
                   // Grows during a drag: a one-line header is a miserable thing
                   // to aim at.
-                  implicitHeight: roomHeader.implicitHeight
+                  implicitHeight: (roomItem.isOther
+                      ? roomHeader.implicitHeight : cardCol.implicitHeight + Style.space(16))
                     + (root.dragName !== "" ? Style.space(14) : 0)
 
+                  // "other" is not a room: plain heading, no card, no switch.
                   PanelSectionHeader {
                     id: roomHeader
+                    visible: roomItem.isOther
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
                     text: roomItem.room.name
@@ -398,22 +409,100 @@ BarWidget {
                     }
                   }
 
-                  Row {
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: Style.space(4)
+                  Rectangle {
+                    visible: !roomItem.isOther
+                    anchors.fill: parent
+                    radius: Style.cornerRadius
+                    color: root.surface
 
-                    PanelActionButton {
-                      iconText: "\uf011"
-                      tooltipText: "All off"
-                      foreground: root.foreground
-                      onClicked: root.act(["off", "room:" + roomItem.room.name], "")
-                    }
-                    PanelActionButton {
-                      iconText: "\uf0eb"
-                      tooltipText: "All on"
-                      foreground: root.foreground
-                      onClicked: root.act(["on", "room:" + roomItem.room.name], "")
+                    Column {
+                      id: cardCol
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.margins: Style.space(8)
+                      spacing: Style.space(6)
+
+                      Item {
+                        width: parent.width
+                        implicitHeight: Math.max(titleCol.implicitHeight, roomSw.implicitHeight)
+
+                        Rectangle {
+                          id: roomDot
+                          width: Style.space(14)
+                          height: width
+                          radius: width / 2
+                          anchors.left: parent.left
+                          anchors.verticalCenter: parent.verticalCenter
+                          color: roomItem.firstOn ? root.dotColor(roomItem.firstOn) : "transparent"
+                          border.width: 1
+                          border.color: Util.alpha(root.foreground, 0.2)
+                        }
+
+                        Column {
+                          id: titleCol
+                          anchors.left: roomDot.right
+                          anchors.leftMargin: Style.space(8)
+                          anchors.right: roomSw.left
+                          anchors.rightMargin: Style.space(8)
+                          anchors.verticalCenter: parent.verticalCenter
+
+                          Text {
+                            width: parent.width
+                            text: roomItem.room.name
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            elide: Text.ElideRight
+                          }
+                          Text {
+                            width: parent.width
+                            text: roomItem.onMembers + " of " + roomItem.room.members.length + " on"
+                              + (roomItem.levels.length ? " · " + roomItem.avg + "%" : "")
+                              + (roomItem.editing ? "  ▴" : "  ▾")
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                            elide: Text.ElideRight
+                          }
+                        }
+
+                        // Covers the title only, not the switch.
+                        MouseArea {
+                          anchors.left: parent.left
+                          anchors.right: roomSw.left
+                          anchors.top: parent.top
+                          anchors.bottom: parent.bottom
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.expandedName =
+                            roomItem.editing ? "" : "room:" + roomItem.room.name
+                        }
+
+                        ToggleSwitch {
+                          id: roomSw
+                          anchors.right: parent.right
+                          anchors.verticalCenter: parent.verticalCenter
+                          checked: roomItem.onMembers > 0
+                          foreground: root.foreground
+                          cursorRing: false
+                          onToggled: root.act([checked ? "off" : "on", "room:" + roomItem.room.name], "")
+                        }
+                      }
+
+                      PanelSlider {
+                        visible: roomItem.onMembers > 0 && roomItem.levels.length > 0
+                        width: parent.width
+                        bar: root.bar
+                        minimum: 0
+                        maximum: 100
+                        step: 1
+                        integer: true
+                        value: roomItem.avg
+                        onReleased: function (v) {
+                          root.act(["brightness", String(Math.round(v)),
+                                    "room:" + roomItem.room.name], "")
+                        }
+                      }
                     }
                   }
                 }
@@ -442,24 +531,6 @@ BarWidget {
                     }
                   }
 
-                  PanelSlider {
-                    width: parent.width
-                    bar: root.bar
-                    minimum: 0
-                    maximum: 100
-                    step: 1
-                    integer: true
-                    value: {
-                      var levels = roomItem.room.members.map(function (d) { return d.brightness })
-                        .filter(function (v) { return typeof v === "number" })
-                      return levels.length ? Math.round(levels.reduce(function (a, b) { return a + b }, 0) / levels.length) : 0
-                    }
-                    onReleased: function (v) {
-                      root.act(["brightness", String(Math.round(v)),
-                                "room:" + roomItem.room.name], "")
-                    }
-                  }
-
                   Flow {
                     width: parent.width
                     spacing: Style.space(5)
@@ -483,6 +554,13 @@ BarWidget {
                                                "room:" + roomItem.room.name], "")
                         }
                       }
+                    }
+                  }
+
+                  HueStrip {
+                    width: parent.width
+                    onPicked: function (hex) {
+                      root.act(["color", hex, "room:" + roomItem.room.name], "")
                     }
                   }
 

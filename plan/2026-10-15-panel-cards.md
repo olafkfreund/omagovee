@@ -128,6 +128,10 @@ spec: spec/2026-10-15-panel-cards.md
    and gets a `HueStrip` that calls
    `root.act(["color", hex, "room:" + roomItem.room.name], "")`.
    Delete the two `PanelActionButton`s, which the switch replaces.
+   Deviation: the header `Item` is kept (it carries the drag-grow height);
+   the card is a `Rectangle` inside it and `PanelSectionHeader` is shown only
+   for "other". The card has its own slider row, so the room slider is not in
+   the expanded section any more.
    → verify in step 7.
    Traps: `DropArea` and the highlight `Rectangle` (current lines 633-657)
    stay outside the Column, anchored to `roomItem`. Do not move them into
