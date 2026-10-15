@@ -70,19 +70,6 @@ BarWidget {
     return parts.join(" · ")
   }
 
-  // nf-md glyphs per device kind; `kind` comes from the CLI, which is the one
-  // place that knows how to read a Govee SKU.
-  readonly property var kindIcons: {
-    "bulb":   "󰌵",
-    "strip":  "󰟕",
-    "string": "󱊺",
-    "lamp":   "󰚵"
-  }
-
-  function kindIcon(kind) {
-    return kindIcons[kind] || kindIcons["bulb"]
-  }
-
   readonly property var swatches: [
     { name: "warm",   rgb: "#ff9329" },
     { name: "cool",   rgb: "#cce0ff" },
@@ -581,17 +568,20 @@ BarWidget {
                     // ----- device row -----
                     Item {
                       width: parent.width
-                      implicitHeight: Math.max(nameText.implicitHeight, sw.implicitHeight)
+                      implicitHeight: content.implicitHeight
                       z: root.dragName === devItem.dev.mac ? 100 : 0
 
                       // Only `content` moves while dragging. The row keeps its
                       // slot in the Column, so the list does not reflow under
                       // the cursor mid-drag and the drop lands where you aimed.
-                      Item {
+                      Rectangle {
                         id: content
                         width: parent.width
                         height: parent.height
-                        opacity: Drag.active ? 0.6 : 1.0
+                        implicitHeight: cardCol.implicitHeight + Style.space(16)
+                        radius: Style.cornerRadius
+                        color: root.surface
+                        opacity: Drag.active ? 0.6 : (devItem.dev.online ? 1.0 : 0.5)
 
                         // Read back off `drop.source` by the room that catches it.
                         property string devName: devItem.dev.mac
@@ -664,48 +654,97 @@ BarWidget {
                           }
                         }
 
-                        Text {
-                          id: typeIcon
+                        Column {
+                          id: cardCol
                           anchors.left: dragArea.right
-                          anchors.leftMargin: Style.space(6)
-                          anchors.verticalCenter: parent.verticalCenter
-                          text: root.kindIcon(devItem.dev.kind)
-                          color: root.foreground
-                          opacity: devItem.dev.online ? 0.85 : 0.35
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-                        }
-
-                        Text {
-                          id: nameText
-                          anchors.left: typeIcon.right
-                          anchors.leftMargin: Style.space(6)
-                          anchors.verticalCenter: parent.verticalCenter
-                          text: (devItem.dev.label || devItem.dev.name)
-                            + (devItem.dev.online === true ? "" : devItem.dev.online === false ? "  (offline)" : "  (unknown)")
-                            + (devItem.dev.ip ? "  ·  lan" : "")
-                          color: root.foreground
-                          opacity: devItem.dev.online ? 1.0 : 0.45
-                          font.family: root.fontFamily
-                          font.pixelSize: Style.font.caption
-
-                          MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.expandedName =
-                              devItem.isExpanded ? "" : devItem.dev.mac
-                          }
-                        }
-
-                        ToggleSwitch {
-                          id: sw
                           anchors.right: parent.right
                           anchors.verticalCenter: parent.verticalCenter
-                          checked: devItem.dev.power === 1
-                          interactive: devItem.dev.online
-                          busy: root.busyName === devItem.dev.mac
-                          foreground: root.foreground
-                          onToggled: root.act([checked ? "off" : "on", devItem.dev.mac],
-                                              devItem.dev.mac)
+                          anchors.leftMargin: Style.space(4)
+                          anchors.rightMargin: Style.space(8)
+                          spacing: Style.space(6)
+
+                          Item {
+                            width: parent.width
+                            implicitHeight: Math.max(titleCol.implicitHeight, sw.implicitHeight)
+
+                            Rectangle {
+                              id: devDot
+                              width: Style.space(14)
+                              height: width
+                              radius: width / 2
+                              anchors.left: parent.left
+                              anchors.verticalCenter: parent.verticalCenter
+                              color: root.dotColor(devItem.dev)
+                              border.width: 1
+                              border.color: Util.alpha(root.foreground, 0.2)
+                            }
+
+                            Column {
+                              id: titleCol
+                              anchors.left: devDot.right
+                              anchors.leftMargin: Style.space(8)
+                              anchors.right: sw.left
+                              anchors.rightMargin: Style.space(8)
+                              anchors.verticalCenter: parent.verticalCenter
+
+                              Text {
+                                width: parent.width
+                                text: devItem.dev.label || devItem.dev.name
+                                color: root.foreground
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+                                elide: Text.ElideRight
+                              }
+                              Text {
+                                width: parent.width
+                                text: root.subtitle(devItem.dev) + (devItem.isExpanded ? "  ▴" : "  ▾")
+                                color: root.dim
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                elide: Text.ElideRight
+                              }
+                            }
+
+                            // Stops at the switch; the grip to its left is dragArea.
+                            MouseArea {
+                              anchors.left: parent.left
+                              anchors.right: sw.left
+                              anchors.top: parent.top
+                              anchors.bottom: parent.bottom
+                              cursorShape: Qt.PointingHandCursor
+                              onClicked: root.expandedName =
+                                devItem.isExpanded ? "" : devItem.dev.mac
+                            }
+
+                            ToggleSwitch {
+                              id: sw
+                              anchors.right: parent.right
+                              anchors.verticalCenter: parent.verticalCenter
+                              checked: devItem.dev.power === 1
+                              interactive: devItem.dev.online
+                              busy: root.busyName === devItem.dev.mac
+                              foreground: root.foreground
+                              cursorRing: false
+                              onToggled: root.act([checked ? "off" : "on", devItem.dev.mac],
+                                                  devItem.dev.mac)
+                            }
+                          }
+
+                          PanelSlider {
+                            visible: devItem.dev.power === 1 && devItem.dev.online
+                              && typeof devItem.dev.brightness === "number"
+                            width: parent.width
+                            bar: root.bar
+                            minimum: 0
+                            maximum: 100
+                            step: 1
+                            integer: true
+                            value: typeof devItem.dev.brightness === "number" ? devItem.dev.brightness : 0
+                            onReleased: function (v) {
+                              root.act(["brightness", String(Math.round(v)), devItem.dev.mac],
+                                       devItem.dev.mac)
+                            }
+                          }
                         }
                       }
                     }
@@ -788,22 +827,6 @@ BarWidget {
                             root.act(["rooms", "assign", name, devItem.dev.mac], "")
                           text = ""
                           focus = false
-                        }
-                      }
-
-                      PanelSlider {
-                        width: parent.width
-                        bar: root.bar
-                        minimum: 0
-                        maximum: 100
-                        step: 1
-                        integer: true
-                        value: devItem.dev.brightness === null || devItem.dev.brightness === undefined
-                          ? 0 : devItem.dev.brightness
-                        enabled: typeof devItem.dev.brightness === "number"
-                        onReleased: function (v) {
-                          root.act(["brightness", String(Math.round(v)), devItem.dev.mac],
-                                   devItem.dev.mac)
                         }
                       }
 

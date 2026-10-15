@@ -159,6 +159,10 @@ spec: spec/2026-10-15-panel-cards.md
    still contain the inline slider. So put the slider inside the card
    Rectangle, under the title row (a Column inside the card), not in the
    expanded section.
+   Deviation: the expand `MouseArea` is a child of the title-row Item (left
+   edge to `sw.left`), not anchored to `dragArea.right`: `dragArea` is not its
+   sibling, and QML anchors only reach siblings and the parent. The row Item
+   already starts after the grip, so the area is the same.
    → verify in step 7.
    Traps:
    - The slot Item keeps `z: root.dragName === devItem.dev.mac ? 100 : 0`,
