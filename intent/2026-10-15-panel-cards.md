@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: none  # repo convention so far; add the issue number if one is opened
 author: olafkfreund
 ---
@@ -65,6 +65,11 @@ These need CLI or data work the look itself does not:
   request queue with coalescing, `state.json` file watching.
 
 ## Open questions
+
+Approved without answers; the defaults below stand unless changed in the spec:
+rooms become group cards with their lights beneath, no follow-ups now,
+scenes stay as chips.
+
 
 1. Rooms: show each room as one group card (aggregate switch + slider) with
    its lights as cards beneath it, or keep a plain room heading over light
