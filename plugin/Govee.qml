@@ -244,16 +244,61 @@ BarWidget {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(330))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+    contentHeight: panel.fittedContentHeight(
+      header.implicitHeight + Style.space(10) + column.implicitHeight, Style.space(900))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       blocked: root.editors > 0
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        if (root.expandedName !== "") root.expandedName = ""
+        else root.close()
+      }
+
+      // Pinned above the scroll area. Not wrapped in a Column with the
+      // Flickable: that would re-indent the whole list for no behaviour change.
+      Row {
+        id: header
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width - actions.width - parent.spacing
+          anchors.verticalCenter: parent.verticalCenter
+          text: "GOVEE" + (root.devices.length
+                           ? "  ·  " + root.onLights + "/" + root.devices.length + " ON" : "")
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.subtitle
+          font.bold: true
+          elide: Text.ElideRight
+        }
+
+        Row {
+          id: actions
+          spacing: Style.space(6)
+
+          ActionButton {
+            label: "All on"
+            outlined: true
+            onTriggered: root.act(["on", "all"], "")
+          }
+          ActionButton {
+            label: "All off"
+            outlined: true
+            onTriggered: root.act(["off", "all"], "")
+          }
+        }
+      }
 
       Flickable {
-        anchors.fill: parent
+        anchors.top: header.bottom
+        anchors.topMargin: Style.space(10)
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         contentHeight: column.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
@@ -283,10 +328,10 @@ BarWidget {
                 required property string modelData
                 radius: Style.cornerRadius
                 color: sceneMouse.containsMouse
-                  ? Style.selectedFillFor(root.foreground, Color.accent)
+                  ? Util.alpha(root.foreground, 0.09)
                   : "transparent"
                 border.width: 1
-                border.color: Style.selectedFillFor(root.foreground, Color.accent)
+                border.color: Util.alpha(root.foreground, 0.35)
                 implicitWidth: sceneLabel.implicitWidth + Style.space(16)
                 implicitHeight: sceneLabel.implicitHeight + Style.space(8)
 

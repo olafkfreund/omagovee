@@ -75,6 +75,8 @@ spec: spec/2026-10-15-panel-cards.md
    `clicked()`. `HueStrip`'s marker uses `root.foreground`.
    → verify in step 7 (load check).
    Traps: `component` declarations must sit directly inside the root object.
+   The `ActionButton` wrapper exposes `triggered()`, not `clicked()`: use
+   `onTriggered:` on it (`Button` underneath still emits `clicked()`).
 
 3. Header (`KeyboardPanel` content, current lines 153-183): wrap the
    `Flickable` in a `Column` (spacing `Style.space(10)`). Put a header `Row`
@@ -93,6 +95,10 @@ spec: spec/2026-10-15-panel-cards.md
    Restyle the scene chips: radius `Style.cornerRadius`, border
    `Util.alpha(root.foreground, 0.35)`, hover fill
    `Util.alpha(root.foreground, 0.09)`.
+   Deviation: the header is a `Row` anchored above the `Flickable` (which is
+   anchored below it), not a wrapper `Column`, so the list is not re-indented.
+   The `fittedContentHeight(...)` cap is on the `KeyboardPanel`'s
+   `contentHeight`; the Flickable's stays `column.implicitHeight`.
    → verify in step 7.
    Traps: `PanelKeyCatcher` must still be the `focusTarget` and stay
    `anchors.fill: parent`. Keep `interactive: root.dragName === ""` on the
