@@ -147,3 +147,19 @@ should still be quiet.
 `git revert` the implementation commits. The installed copy is unaffected
 until it is reinstalled. Host config: `~/.config/omarchy/shell.json.bak-govee`
 restores the pre-fix `plugins[]`.
+
+## Deviations during implementation
+
+Made after the implementation review (Opus, Codex, agy):
+
+- The static bare-`Color.` check runs at the start of `main()`, before the
+  `qs` run, instead of after the output check. It names the exact regression
+  first, and negative check (a) now works as worded.
+- The test asserts that `Ui/KeyboardPanel.qml` exists before the strip guard,
+  so a rename upstream fails loudly instead of skipping the guard.
+- Stage 6 ends with `test.stage++; return`. A new stage 7 prints
+  `GOVEE_QML_PASS` and quits one tick later, so the expanded device gets laid
+  out before exit.
+- Kept as is: the `KeyboardPanel.qml` guard checks the two exact continuation
+  lines, not "no `WlrKeyboardFocus.`", because a comment in that file contains
+  the token.

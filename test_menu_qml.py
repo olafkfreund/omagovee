@@ -27,6 +27,10 @@ def strip_layershell(path):
 
 def main():
     omarchy = Path(os.environ['OMARCHY_PATH'])
+    # Some bare-Color bindings fail silently (Style.selectedFillFor accepts undefined), so check the source too.
+    for qml_file in sorted((ROOT / 'plugin').glob('*.qml')):
+        for number, line in enumerate(qml_file.read_text().splitlines(), 1):
+            assert not re.search(r'(?<![\w.])Color\.', line), f'bare Color. at {qml_file.name}:{number}'
     with tempfile.TemporaryDirectory(prefix='omagovee-qml-') as directory:
         tmp = Path(directory)
         shutil.copytree(ROOT / 'plugin', tmp / 'plugin')
@@ -38,6 +42,7 @@ def main():
         for path in (tmp / 'Ui').rglob('*'):
             path.chmod(0o755 if path.is_dir() else 0o644)
         strip_layershell(tmp / 'plugin/GoveeMenu.qml')
+        assert (tmp / 'Ui/KeyboardPanel.qml').is_file(), 'Ui/KeyboardPanel.qml missing upstream'
         for copy in (tmp / 'Ui').rglob('*.qml'):
             source = (omarchy / 'shell/Ui' / copy.relative_to(tmp / 'Ui')).read_text().splitlines()
             kept = strip_layershell(copy)
@@ -188,6 +193,10 @@ ShellRoot {
         if (test.stage === 6) {
           bar.expandedName = "AA:01"
           test.check(bar.expandedName === "AA:01", "device expands")
+          test.stage++
+          return
+        }
+        if (test.stage === 7) {  // one more tick so the expanded device is laid out
           console.log("GOVEE_QML_PASS")
           Qt.quit()
         }
@@ -227,9 +236,6 @@ ShellRoot {
         bad = [line for line in output.splitlines()
                if (re.search(r'\b(WARN|ERROR)\b', line) or 'Error:' in line) and line.strip() != allowed]
         assert not bad, 'unexpected qs output:\n' + '\n'.join(bad)
-        for qml_file in sorted((ROOT / 'plugin').glob('*.qml')):
-            for number, line in enumerate(qml_file.read_text().splitlines(), 1):
-                assert not re.search(r'(?<![\w.])Color\.', line), f'bare Color. at {qml_file.name}:{number}'
         calls = [json.loads(line) for line in (tmp / 'calls.jsonl').read_text().splitlines()]
         actions = [call for call in calls if call != ['dump']]
         assert actions == [['--json','brightness','35','AA:01'], ['--json','on','AA:01'], ['--json','off','AA:01']], actions
