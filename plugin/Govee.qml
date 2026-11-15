@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Govee lights: a bar button that opens a dropdown of scenes, rooms and
@@ -46,17 +47,30 @@ BarWidget {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  // nf-md glyphs per device kind; `kind` comes from the CLI, which is the one
-  // place that knows how to read a Govee SKU.
-  readonly property var kindIcons: {
-    "bulb":   "󰌵",
-    "strip":  "󰟕",
-    "string": "󱊺",
-    "lamp":   "󰚵"
+  // Tokens from eldtechnologies/omarchy-plugin-govee Panel.qml (MIT).
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property color surface: Util.alpha(foreground, 0.05)
+  property int onLights: 0
+
+  // Swatch colour of a light; transparent when it is off or has no reading.
+  function dotColor(dev) {
+    if (dev.power !== 1 || !dev.color) return "transparent"
+    return Qt.rgba(dev.color.r / 255, dev.color.g / 255, dev.color.b / 255, 1)
   }
 
-  function kindIcon(kind) {
-    return kindIcons[kind] || kindIcons["bulb"]
+  // "60% · LAN": state first, then the transport when the read reported one.
+  function subtitle(dev) {
+    var parts = []
+    if (dev.online === false)
+      parts.push("offline")
+    else if (dev.power === 1)
+      parts.push(typeof dev.brightness === "number" ? dev.brightness + "%" : "on")
+    else
+      parts.push(dev.online === true ? "off" : "unknown")
+    if (dev.transport) parts.push(dev.transport === "lan" ? "LAN" : "cloud")
+    return parts.join(" · ")
   }
 
   readonly property var swatches: [
@@ -116,10 +130,11 @@ BarWidget {
     root.roomList = list
     root.roomNames = names
 
-    var anyOn = false
+    var onCount = 0
     for (var m = 0; m < root.devices.length; m++)
-      if (root.devices[m].power === 1) anyOn = true
-    root.lit = anyOn
+      if (root.devices[m].power === 1) onCount++
+    root.lit = onCount > 0
+    root.onLights = onCount
   }
 
   // One source of truth: the same dump the panel draws from also decides the
@@ -133,6 +148,69 @@ BarWidget {
     running: true
     repeat: true
     onTriggered: if (root.editors === 0 && !root.dragName) root.refresh()
+  }
+
+  // From eldtechnologies/omarchy-plugin-govee Panel.qml (MIT).
+  component ActionButton: Button {
+    property string label: ""
+    property bool outlined: false
+    signal triggered()
+
+    text: label
+    bordered: outlined
+    foreground: root.foreground
+    accent: Commons.Color.accent
+    fontFamily: root.fontFamily
+    fontSize: Style.font.bodySmall
+    opacity: enabled ? 1 : 0.4
+    onClicked: if (enabled) triggered()
+  }
+
+  // From eldtechnologies/omarchy-plugin-govee Panel.qml (MIT).
+  // A rainbow strip: click or drag to pick a saturated colour.
+  component HueStrip: Item {
+    id: strip
+    signal picked(string hex)
+    implicitHeight: Style.space(20)
+
+    function colorAt(x) {
+      return String(Qt.hsva(Math.max(0, Math.min(0.999, x / width)), 1, 1, 1))
+    }
+
+    Rectangle {
+      anchors.fill: parent
+      radius: Math.min(Style.cornerRadius, height / 2)
+      gradient: Gradient {
+        orientation: Gradient.Horizontal
+        GradientStop { position: 0.0; color: "#ff0000" }
+        GradientStop { position: 0.17; color: "#ffff00" }
+        GradientStop { position: 0.33; color: "#00ff00" }
+        GradientStop { position: 0.5; color: "#00ffff" }
+        GradientStop { position: 0.67; color: "#0000ff" }
+        GradientStop { position: 0.83; color: "#ff00ff" }
+        GradientStop { position: 1.0; color: "#ff0000" }
+      }
+    }
+
+    Rectangle {
+      id: marker
+      visible: hueMouse.pressed
+      width: Style.space(4)
+      height: parent.height + Style.space(4)
+      anchors.verticalCenter: parent.verticalCenter
+      x: Math.max(0, Math.min(parent.width - width, hueMouse.mouseX - width / 2))
+      color: root.foreground
+      radius: width / 2
+    }
+
+    MouseArea {
+      id: hueMouse
+      anchors.fill: parent
+      // Inside a Flickable: without this a drag with vertical jitter is stolen.
+      preventStealing: true
+      cursorShape: Qt.PointingHandCursor
+      onReleased: function(mouse) { strip.picked(strip.colorAt(mouse.x)) }
+    }
   }
 
   BarIconButton {
@@ -158,16 +236,61 @@ BarWidget {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(330))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight)
+    contentHeight: panel.fittedContentHeight(
+      header.implicitHeight + Style.space(10) + column.implicitHeight, Style.space(900))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       blocked: root.editors > 0
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        if (root.expandedName !== "") root.expandedName = ""
+        else root.close()
+      }
+
+      // Pinned above the scroll area. Not wrapped in a Column with the
+      // Flickable: that would re-indent the whole list for no behaviour change.
+      Row {
+        id: header
+        width: parent.width
+        spacing: Style.space(8)
+
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width - actions.width - parent.spacing
+          anchors.verticalCenter: parent.verticalCenter
+          text: "GOVEE" + (root.devices.length
+                           ? "  ·  " + root.onLights + "/" + root.devices.length + " ON" : "")
+          color: root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.subtitle
+          font.bold: true
+          elide: Text.ElideRight
+        }
+
+        Row {
+          id: actions
+          spacing: Style.space(6)
+
+          ActionButton {
+            label: "All on"
+            outlined: true
+            onTriggered: root.act(["on", "all"], "")
+          }
+          ActionButton {
+            label: "All off"
+            outlined: true
+            onTriggered: root.act(["off", "all"], "")
+          }
+        }
+      }
 
       Flickable {
-        anchors.fill: parent
+        anchors.top: header.bottom
+        anchors.topMargin: Style.space(10)
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
         contentHeight: column.implicitHeight
         clip: true
         boundsBehavior: Flickable.StopAtBounds
@@ -184,7 +307,7 @@ BarWidget {
           // ---------- scenes ----------
           PanelSectionHeader {
             text: root.loading ? "Scenes · refreshing…" : "Scenes"
-            foreground: root.bar ? root.bar.foreground : Color.foreground
+            foreground: root.foreground
           }
 
           Flow {
@@ -197,10 +320,10 @@ BarWidget {
                 required property string modelData
                 radius: Style.cornerRadius
                 color: sceneMouse.containsMouse
-                  ? Style.selectedFillFor(root.bar.foreground, Color.accent)
+                  ? Util.alpha(root.foreground, 0.09)
                   : "transparent"
                 border.width: 1
-                border.color: Style.selectedFillFor(root.bar.foreground, Color.accent)
+                border.color: Util.alpha(root.foreground, 0.35)
                 implicitWidth: sceneLabel.implicitWidth + Style.space(16)
                 implicitHeight: sceneLabel.implicitHeight + Style.space(8)
 
@@ -208,8 +331,8 @@ BarWidget {
                   id: sceneLabel
                   anchors.centerIn: parent
                   text: parent.modelData
-                  color: root.bar ? root.bar.foreground : Color.foreground
-                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  color: root.foreground
+                  font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
 
@@ -237,6 +360,14 @@ BarWidget {
               required property var modelData
               readonly property var room: modelData
               readonly property bool editing: root.expandedName === "room:" + room.name
+              readonly property bool isOther: room.name === "other"
+              readonly property var onList: room.members.filter(function (d) { return d.power === 1 })
+              readonly property int onMembers: onList.length
+              readonly property var firstOn: onList.length ? onList[0] : null
+              readonly property var levels: room.members.map(function (d) { return d.brightness })
+                .filter(function (v) { return typeof v === "number" })
+              readonly property int avg: levels.length
+                ? Math.round(levels.reduce(function (a, b) { return a + b }, 0) / levels.length) : 0
               width: column.width
               implicitHeight: roomCol.implicitHeight
               z: root.dragRoom === room.name ? 100 : 0
@@ -250,15 +381,18 @@ BarWidget {
                   width: parent.width
                   // Grows during a drag: a one-line header is a miserable thing
                   // to aim at.
-                  implicitHeight: roomHeader.implicitHeight
+                  implicitHeight: (roomItem.isOther
+                      ? roomHeader.implicitHeight : roomCardCol.implicitHeight + Style.space(16))
                     + (root.dragName !== "" ? Style.space(14) : 0)
 
+                  // "other" is not a room: plain heading, no card, no switch.
                   PanelSectionHeader {
                     id: roomHeader
+                    visible: roomItem.isOther
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
                     text: roomItem.room.name
-                    foreground: root.bar ? root.bar.foreground : Color.foreground
+                    foreground: root.foreground
 
                     MouseArea {
                       anchors.fill: parent
@@ -267,22 +401,100 @@ BarWidget {
                     }
                   }
 
-                  Row {
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    spacing: Style.space(4)
+                  Rectangle {
+                    visible: !roomItem.isOther
+                    anchors.fill: parent
+                    radius: Style.cornerRadius
+                    color: root.surface
 
-                    PanelActionButton {
-                      iconText: "\uf011"
-                      tooltipText: "All off"
-                      foreground: root.bar ? root.bar.foreground : Color.foreground
-                      onClicked: root.act(["off", "room:" + roomItem.room.name], "")
-                    }
-                    PanelActionButton {
-                      iconText: "\uf0eb"
-                      tooltipText: "All on"
-                      foreground: root.bar ? root.bar.foreground : Color.foreground
-                      onClicked: root.act(["on", "room:" + roomItem.room.name], "")
+                    Column {
+                      id: roomCardCol
+                      anchors.left: parent.left
+                      anchors.right: parent.right
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.margins: Style.space(8)
+                      spacing: Style.space(6)
+
+                      Item {
+                        width: parent.width
+                        implicitHeight: Math.max(roomTitleCol.implicitHeight, roomSw.implicitHeight)
+
+                        Rectangle {
+                          id: roomDot
+                          width: Style.space(14)
+                          height: width
+                          radius: width / 2
+                          anchors.left: parent.left
+                          anchors.verticalCenter: parent.verticalCenter
+                          color: roomItem.firstOn ? root.dotColor(roomItem.firstOn) : "transparent"
+                          border.width: 1
+                          border.color: Util.alpha(root.foreground, 0.2)
+                        }
+
+                        Column {
+                          id: roomTitleCol
+                          anchors.left: roomDot.right
+                          anchors.leftMargin: Style.space(8)
+                          anchors.right: roomSw.left
+                          anchors.rightMargin: Style.space(8)
+                          anchors.verticalCenter: parent.verticalCenter
+
+                          Text {
+                            width: parent.width
+                            text: roomItem.room.name
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            elide: Text.ElideRight
+                          }
+                          Text {
+                            width: parent.width
+                            text: roomItem.onMembers + " of " + roomItem.room.members.length + " on"
+                              + (roomItem.onMembers > 0 && roomItem.levels.length ? " · " + roomItem.avg + "%" : "")
+                              + (roomItem.editing ? "  ▴" : "  ▾")
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
+                            elide: Text.ElideRight
+                          }
+                        }
+
+                        // Covers the title only, not the switch.
+                        MouseArea {
+                          anchors.left: parent.left
+                          anchors.right: roomSw.left
+                          anchors.top: parent.top
+                          anchors.bottom: parent.bottom
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.expandedName =
+                            roomItem.editing ? "" : "room:" + roomItem.room.name
+                        }
+
+                        ToggleSwitch {
+                          id: roomSw
+                          anchors.right: parent.right
+                          anchors.verticalCenter: parent.verticalCenter
+                          checked: roomItem.onMembers > 0
+                          foreground: root.foreground
+                          cursorRing: false
+                          onToggled: root.act([checked ? "off" : "on", "room:" + roomItem.room.name], "")
+                        }
+                      }
+
+                      PanelSlider {
+                        visible: roomItem.onMembers > 0 && roomItem.levels.length > 0
+                        width: parent.width
+                        bar: root.bar
+                        minimum: 0
+                        maximum: 100
+                        step: 1
+                        integer: true
+                        value: roomItem.avg
+                        onReleased: function (v) {
+                          root.act(["brightness", String(Math.round(v)),
+                                    "room:" + roomItem.room.name], "")
+                        }
+                      }
                     }
                   }
                 }
@@ -299,7 +511,7 @@ BarWidget {
                     text: roomItem.room.name
                     placeholderText: "Room name"
                     verticalPadding: Style.space(3)
-                    foreground: root.bar ? root.bar.foreground : Color.foreground
+                    foreground: root.foreground
                     enabled: roomItem.room.name !== "other"
                     onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
                     onAccepted: {
@@ -311,24 +523,6 @@ BarWidget {
                     }
                   }
 
-                  PanelSlider {
-                    width: parent.width
-                    bar: root.bar
-                    minimum: 0
-                    maximum: 100
-                    step: 1
-                    integer: true
-                    value: {
-                      var levels = roomItem.room.members.map(function (d) { return d.brightness })
-                        .filter(function (v) { return typeof v === "number" })
-                      return levels.length ? Math.round(levels.reduce(function (a, b) { return a + b }, 0) / levels.length) : 0
-                    }
-                    onReleased: function (v) {
-                      root.act(["brightness", String(Math.round(v)),
-                                "room:" + roomItem.room.name], "")
-                    }
-                  }
-
                   Flow {
                     width: parent.width
                     spacing: Style.space(5)
@@ -337,21 +531,30 @@ BarWidget {
                       model: root.swatches
                       delegate: Rectangle {
                         required property var modelData
-                        width: Style.space(20)
-                        height: Style.space(20)
-                        radius: Style.cornerRadius > 0 ? width / 2 : 0
+                        width: Style.space(26)
+                        height: Style.space(26)
+                        radius: width / 2
                         color: modelData.rgb
                         border.width: roomSwatch.containsMouse ? 2 : 1
-                        border.color: root.bar ? root.bar.foreground : Color.foreground
+                        border.color: roomSwatch.containsMouse
+                          ? root.foreground : Util.alpha(root.foreground, 0.25)
 
                         MouseArea {
                           id: roomSwatch
                           anchors.fill: parent
+                          cursorShape: Qt.PointingHandCursor
                           hoverEnabled: true
                           onClicked: root.act(["color", parent.modelData.name,
                                                "room:" + roomItem.room.name], "")
                         }
                       }
+                    }
+                  }
+
+                  HueStrip {
+                    width: parent.width
+                    onPicked: function (hex) {
+                      root.act(["color", hex, "room:" + roomItem.room.name], "")
                     }
                   }
 
@@ -372,17 +575,20 @@ BarWidget {
                     // ----- device row -----
                     Item {
                       width: parent.width
-                      implicitHeight: Math.max(nameText.implicitHeight, sw.implicitHeight)
+                      implicitHeight: content.implicitHeight
                       z: root.dragName === devItem.dev.mac ? 100 : 0
 
                       // Only `content` moves while dragging. The row keeps its
                       // slot in the Column, so the list does not reflow under
                       // the cursor mid-drag and the drop lands where you aimed.
-                      Item {
+                      Rectangle {
                         id: content
                         width: parent.width
                         height: parent.height
-                        opacity: Drag.active ? 0.6 : 1.0
+                        implicitHeight: cardCol.implicitHeight + Style.space(16)
+                        radius: Style.cornerRadius
+                        color: root.surface
+                        opacity: Drag.active ? 0.6 : (devItem.dev.online ? 1.0 : 0.5)
 
                         // Read back off `drop.source` by the room that catches it.
                         property string devName: devItem.dev.mac
@@ -447,56 +653,105 @@ BarWidget {
                           Text {
                             anchors.centerIn: parent
                             text: "\u2630"
-                            color: root.bar ? root.bar.foreground : Color.foreground
+                            color: root.foreground
                             opacity: dragArea.containsMouse || dragArea.drag.active
                               ? 0.9 : 0.3
-                            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                            font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
                           }
                         }
 
-                        Text {
-                          id: typeIcon
+                        Column {
+                          id: cardCol
                           anchors.left: dragArea.right
-                          anchors.leftMargin: Style.space(6)
-                          anchors.verticalCenter: parent.verticalCenter
-                          text: root.kindIcon(devItem.dev.kind)
-                          color: root.bar ? root.bar.foreground : Color.foreground
-                          opacity: devItem.dev.online ? 0.85 : 0.35
-                          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                          font.pixelSize: Style.font.caption
-                        }
-
-                        Text {
-                          id: nameText
-                          anchors.left: typeIcon.right
-                          anchors.leftMargin: Style.space(6)
-                          anchors.verticalCenter: parent.verticalCenter
-                          text: (devItem.dev.label || devItem.dev.name)
-                            + (devItem.dev.online === true ? "" : devItem.dev.online === false ? "  (offline)" : "  (unknown)")
-                            + (devItem.dev.ip ? "  ·  lan" : "")
-                          color: root.bar ? root.bar.foreground : Color.foreground
-                          opacity: devItem.dev.online ? 1.0 : 0.45
-                          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                          font.pixelSize: Style.font.caption
-
-                          MouseArea {
-                            anchors.fill: parent
-                            onClicked: root.expandedName =
-                              devItem.isExpanded ? "" : devItem.dev.mac
-                          }
-                        }
-
-                        ToggleSwitch {
-                          id: sw
                           anchors.right: parent.right
                           anchors.verticalCenter: parent.verticalCenter
-                          checked: devItem.dev.power === 1
-                          interactive: devItem.dev.online
-                          busy: root.busyName === devItem.dev.mac
-                          foreground: root.bar ? root.bar.foreground : Color.foreground
-                          onToggled: root.act([checked ? "off" : "on", devItem.dev.mac],
-                                              devItem.dev.mac)
+                          anchors.leftMargin: Style.space(4)
+                          anchors.rightMargin: Style.space(8)
+                          spacing: Style.space(6)
+
+                          Item {
+                            width: parent.width
+                            implicitHeight: Math.max(titleCol.implicitHeight, sw.implicitHeight)
+
+                            Rectangle {
+                              id: devDot
+                              width: Style.space(14)
+                              height: width
+                              radius: width / 2
+                              anchors.left: parent.left
+                              anchors.verticalCenter: parent.verticalCenter
+                              color: root.dotColor(devItem.dev)
+                              border.width: 1
+                              border.color: Util.alpha(root.foreground, 0.2)
+                            }
+
+                            Column {
+                              id: titleCol
+                              anchors.left: devDot.right
+                              anchors.leftMargin: Style.space(8)
+                              anchors.right: sw.left
+                              anchors.rightMargin: Style.space(8)
+                              anchors.verticalCenter: parent.verticalCenter
+
+                              Text {
+                                width: parent.width
+                                text: devItem.dev.label || devItem.dev.name
+                                color: root.foreground
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+                                elide: Text.ElideRight
+                              }
+                              Text {
+                                width: parent.width
+                                text: root.subtitle(devItem.dev) + (devItem.isExpanded ? "  ▴" : "  ▾")
+                                color: root.dim
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                elide: Text.ElideRight
+                              }
+                            }
+
+                            // Stops at the switch; the grip to its left is dragArea.
+                            MouseArea {
+                              anchors.left: parent.left
+                              anchors.right: sw.left
+                              anchors.top: parent.top
+                              anchors.bottom: parent.bottom
+                              cursorShape: Qt.PointingHandCursor
+                              onClicked: root.expandedName =
+                                devItem.isExpanded ? "" : devItem.dev.mac
+                            }
+
+                            ToggleSwitch {
+                              id: sw
+                              anchors.right: parent.right
+                              anchors.verticalCenter: parent.verticalCenter
+                              checked: devItem.dev.power === 1
+                              interactive: devItem.dev.online
+                              busy: root.busyName === devItem.dev.mac
+                              foreground: root.foreground
+                              cursorRing: false
+                              onToggled: root.act([checked ? "off" : "on", devItem.dev.mac],
+                                                  devItem.dev.mac)
+                            }
+                          }
+
+                          PanelSlider {
+                            visible: devItem.dev.power === 1 && devItem.dev.online === true
+                              && typeof devItem.dev.brightness === "number"
+                            width: parent.width
+                            bar: root.bar
+                            minimum: 0
+                            maximum: 100
+                            step: 1
+                            integer: true
+                            value: typeof devItem.dev.brightness === "number" ? devItem.dev.brightness : 0
+                            onReleased: function (v) {
+                              root.act(["brightness", String(Math.round(v)), devItem.dev.mac],
+                                       devItem.dev.mac)
+                            }
+                          }
                         }
                       }
                     }
@@ -515,7 +770,7 @@ BarWidget {
                         // changes what the panel calls it. Empty clears it.
                         placeholderText: "Friendly name for " + devItem.dev.name
                         verticalPadding: Style.space(3)
-                        foreground: root.bar ? root.bar.foreground : Color.foreground
+                        foreground: root.foreground
                         onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
                         onAccepted: {
                           root.act(["label", devItem.dev.mac].concat(
@@ -536,11 +791,11 @@ BarWidget {
                               modelData === roomItem.room.name
                             radius: Style.cornerRadius
                             color: current || chipMouse.containsMouse
-                              ? Style.selectedFillFor(root.bar.foreground, Color.accent)
+                              ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
                               : "transparent"
                             border.width: 1
-                            border.color: Style.selectedFillFor(root.bar.foreground,
-                                                                Color.accent)
+                            border.color: Style.selectedFillFor(root.foreground,
+                                                                Commons.Color.accent)
                             implicitWidth: chipLabel.implicitWidth + Style.space(12)
                             implicitHeight: chipLabel.implicitHeight + Style.space(6)
 
@@ -548,8 +803,8 @@ BarWidget {
                               id: chipLabel
                               anchors.centerIn: parent
                               text: parent.modelData
-                              color: root.bar ? root.bar.foreground : Color.foreground
-                              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                              color: root.foreground
+                              font.family: root.fontFamily
                               font.pixelSize: Style.font.caption
                             }
 
@@ -571,7 +826,7 @@ BarWidget {
                         width: parent.width
                         placeholderText: "New room…"
                         verticalPadding: Style.space(3)
-                        foreground: root.bar ? root.bar.foreground : Color.foreground
+                        foreground: root.foreground
                         onActiveFocusChanged: root.editors += activeFocus ? 1 : -1
                         onAccepted: {
                           var name = text.trim()
@@ -579,22 +834,6 @@ BarWidget {
                             root.act(["rooms", "assign", name, devItem.dev.mac], "")
                           text = ""
                           focus = false
-                        }
-                      }
-
-                      PanelSlider {
-                        width: parent.width
-                        bar: root.bar
-                        minimum: 0
-                        maximum: 100
-                        step: 1
-                        integer: true
-                        value: devItem.dev.brightness === null || devItem.dev.brightness === undefined
-                          ? 0 : devItem.dev.brightness
-                        enabled: typeof devItem.dev.brightness === "number"
-                        onReleased: function (v) {
-                          root.act(["brightness", String(Math.round(v)), devItem.dev.mac],
-                                   devItem.dev.mac)
                         }
                       }
 
@@ -606,21 +845,30 @@ BarWidget {
                           model: root.swatches
                           delegate: Rectangle {
                             required property var modelData
-                            width: Style.space(20)
-                            height: Style.space(20)
-                            radius: Style.cornerRadius > 0 ? width / 2 : 0
+                            width: Style.space(26)
+                            height: Style.space(26)
+                            radius: width / 2
                             color: modelData.rgb
                             border.width: swatchMouse.containsMouse ? 2 : 1
-                            border.color: root.bar ? root.bar.foreground : Color.foreground
+                            border.color: swatchMouse.containsMouse
+                              ? root.foreground : Util.alpha(root.foreground, 0.25)
 
                             MouseArea {
                               id: swatchMouse
                               anchors.fill: parent
+                              cursorShape: Qt.PointingHandCursor
                               hoverEnabled: true
                               onClicked: root.act(["color", parent.modelData.name,
                                                    devItem.dev.mac], devItem.dev.mac)
                             }
                           }
+                        }
+                      }
+
+                      HueStrip {
+                        width: parent.width
+                        onPicked: function (hex) {
+                          root.act(["color", hex, devItem.dev.mac], devItem.dev.mac)
                         }
                       }
                     }
@@ -653,7 +901,7 @@ BarWidget {
                 radius: Style.cornerRadius
                 color: "transparent"
                 border.width: 1
-                border.color: Style.selectedFillFor(root.bar.foreground, Color.accent)
+                border.color: Style.selectedFillFor(root.foreground, Commons.Color.accent)
               }
             }
           }
