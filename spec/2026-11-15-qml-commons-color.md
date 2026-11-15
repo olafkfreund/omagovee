@@ -13,7 +13,7 @@ intent: intent/2026-11-15-qml-commons-color.md
 In `plugin/Govee.qml` and `plugin/GoveeMenu.qml`, add
 `import qs.Commons as Commons` directly after the existing `import qs.Commons`.
 Change each bare `Color.` to `Commons.Color.`: 5 sites in `Govee.qml` (lines 50,
-161, 793, 797, 903) and 15 in `GoveeMenu.qml` (151–314). Keep the unqualified
+161, 793, 797, 903) and 19 in `GoveeMenu.qml` (17 lines, 151–314). Keep the unqualified
 import so `Style` and `Util` stay as they are.
 
 That is exactly the hand-patch already installed in
@@ -28,23 +28,39 @@ don't need to know which type hides the bare `Color` for this to work.
 - **Test copy of `Ui/`.** Copy `$OMARCHY_PATH/shell/Ui` instead of symlinking
   it. Strip every `WlrLayershell.` binding from the copy, as the test already
   does for `GoveeMenu.qml`, because X11 cannot create Wayland attached
-  properties. A binding can span several lines (`KeyboardPanel.qml:157–159`
-  continues with lines that start with `?` and `:`), so the whole statement
-  goes, including its continuation lines. Stripping only the first line would
-  attach the ternary to the binding above it.
-  Use the same helper for `GoveeMenu.qml`.
+  properties. One helper does both. A stripped statement is the
+  `WlrLayershell.` line plus any following lines whose text starts with `?` or
+  `:`. Today that matters only for `KeyboardPanel.qml:157–159`; every other
+  `Ui/` binding (`OverlayWindow.qml`, `SpeedTestOverlay.qml`) is one line.
+  Stripping only the first line would attach the ternary to the binding above
+  it. A focused check guards the helper: after stripping, no copied file
+  contains `WlrLayershell.`, and in `KeyboardPanel.qml` the bindings around
+  lines 157–159 are unchanged.
 - **Load the bar view.** Add a second `Loader` for `plugin/Govee.qml` next to
-  the menu loader. In a new stage, once its first `dump` has loaded (1 device,
-  1 room): open it, set `expandedName` to `"room:Office"`, then to `"AA:01"`,
-  so the room-chip and drop-border delegates are built. Check
-  `devices.length === 1` and `roomList.length >= 1`. Send no actions, so the
-  existing exact assertion on the CLI calls still holds (`dump` calls are
-  already filtered out).
-- **Warnings fail the test.** After the run, fail if any output line contains
-  `WARN scene:`, `ERROR scene:`, `TypeError` or `ReferenceError`. No allowlist:
-  the patched plugin produces none of these.
-  `WARN: $HYPRLAND_INSTANCE_SIGNATURE is unset` has no `scene:` and doesn't
-  match.
+  the menu loader. The test fails if either loader reaches `Loader.Error`.
+  Add new stages after the existing menu stages, each on its own timer tick so
+  layout runs between them:
+  1. wait until `devices.length === 1` and `roomList.length >= 1` (first
+     `dump`);
+  2. `open()`, check `opened`;
+  3. set `expandedName = "room:Office"` and check it;
+  4. set `expandedName = "AA:01"` and check it.
+
+  The existing `GOVEE_QML_PASS` / `Qt.quit()` moves after the last of these.
+  Send no actions, so the existing exact assertion on the CLI calls still
+  holds: `open()` only triggers `dump` (Govee.qml:88), which is already filtered
+  out.
+- **Warnings fail the test.** After the run, fail on any output line with a
+  `WARN` or `ERROR` log level, or containing `Error:`. The one exception is
+  exactly `WARN: $HYPRLAND_INSTANCE_SIGNATURE is unset. Cannot connect to
+  hyprland.`, which Xvfb causes (the test removes that variable on purpose).
+  The patched plugin produces nothing else.
+- **No bare `Color.` in the plugin.** Some bad colours fail silently:
+  `Style.selectedFillFor(fg, undefined)` (Commons/Style.qml:158) logs no
+  warning, so a regression on room chips (Govee.qml:793, 797) or the drop
+  border (903) would pass a warning check. The test therefore also fails if
+  `plugin/*.qml` contains `Color.` not preceded by `Commons.` (regex
+  `(?<![\w.])Color\.`). Cheap, and it names the exact regression.
 
 A scratch probe proved this. With the patched files, `Govee.qml` loaded,
 opened and expanded with 0 warnings (`devices=1 rooms=1 opened=true`). The repo
@@ -72,8 +88,12 @@ documented way.
   strip-on-copy approach already exists in this test.
 - **PEP 723 header in `test_mcp.py`**: works, but the README already gives a
   command that passes, so it fixes nothing.
-- **Allowlist of tolerated warnings**: none are needed today. An allowlist
-  would hide new ones.
+- **Matching only `scene:` warnings**: misses `console.warn`/`console.error`
+  (`WARN qml:`) and loader errors. Failing on every level, with one exact
+  exception, is stricter and still simple.
+- **Asserting rendered chip/border colour values**: needs `objectName`s added
+  to production delegates and colour maths in the test. The static `Color.`
+  check catches the same regression with no production change.
 
 ## Risks
 
@@ -95,5 +115,9 @@ documented way.
   `node test_menu_model.js`, `uv run --with mcp==1.29.0 test_mcp.py` all pass.
 - `diff -r plugin ~/.config/omarchy/plugins/olafkfreund.govee` is empty after
   the fix, so the repo matches the live, known-good copy.
-- Live: the shell log shows no new lines after the panel and the menu are
-  opened (`omarchy-shell shell summon olafkfreund.govee '{}'` returns `ok`).
+- `omarchy plugin validate plugin` passes.
+- Live, after reinstalling from the repo: the shell log shows no new lines
+  after (a) the keyboard menu opens (`omarchy-shell shell summon
+  olafkfreund.govee '{}'` returns `ok`) and (b) the bar panel is clicked open
+  and a room and a device are expanded by hand. In (b) the room chips show the
+  accent colour. (b) needs the owner at the desktop.
