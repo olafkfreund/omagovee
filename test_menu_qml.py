@@ -5,6 +5,7 @@ Run: python3 test_menu_qml.py. Requires qs, Xvfb and OMARCHY_PATH; no real lamps
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -12,18 +13,52 @@ import tempfile
 ROOT = Path(__file__).resolve().parent
 
 
+def strip_layershell(path):
+    """Drop each WlrLayershell. statement (its line plus following ?/: lines); return kept lines."""
+    kept, dropping = [], False
+    for line in path.read_text().splitlines():
+        text = line.strip()
+        dropping = text.startswith('WlrLayershell.') or (dropping and text.startswith(('?', ':')))
+        if not dropping:
+            kept.append(line)
+    path.write_text('\n'.join(kept) + '\n')
+    return kept
+
+
 def main():
     omarchy = Path(os.environ['OMARCHY_PATH'])
+    # Some bare-Color bindings fail silently (Style.selectedFillFor accepts undefined), so check the source too.
+    for qml_file in sorted((ROOT / 'plugin').glob('*.qml')):
+        for number, line in enumerate(qml_file.read_text().splitlines(), 1):
+            assert not re.search(r'(?<![\w.])Color\.', line), f'bare Color. at {qml_file.name}:{number}'
     with tempfile.TemporaryDirectory(prefix='omagovee-qml-') as directory:
         tmp = Path(directory)
         shutil.copytree(ROOT / 'plugin', tmp / 'plugin')
         # X11 cannot instantiate Wayland attached properties. Only omit the
-        # surface hints in this test copy; production UI/logic stays intact.
-        menu_file = tmp / 'plugin/GoveeMenu.qml'
-        menu_file.write_text('\n'.join(line for line in menu_file.read_text().splitlines()
-                                      if not line.strip().startswith('WlrLayershell.')) + '\n')
+        # surface hints in this test copy of the plugin and Ui/; production UI/logic stays intact.
         (tmp / 'Commons').symlink_to(omarchy / 'shell/Commons', target_is_directory=True)
-        (tmp / 'Ui').symlink_to(omarchy / 'shell/Ui', target_is_directory=True)
+        shutil.copytree(omarchy / 'shell/Ui', tmp / 'Ui')
+        (tmp / 'Ui').chmod(0o755)  # the Nix store copy is read-only
+        for path in (tmp / 'Ui').rglob('*'):
+            path.chmod(0o755 if path.is_dir() else 0o644)
+        strip_layershell(tmp / 'plugin/GoveeMenu.qml')
+        assert (tmp / 'Ui/KeyboardPanel.qml').is_file(), 'Ui/KeyboardPanel.qml missing upstream'
+        for copy in (tmp / 'Ui').rglob('*.qml'):
+            source = (omarchy / 'shell/Ui' / copy.relative_to(tmp / 'Ui')).read_text().splitlines()
+            kept = strip_layershell(copy)
+            assert 'WlrLayershell.' not in '\n'.join(kept), copy
+            matched, removed = 0, False  # unmatched source lines must be stripped statements
+            for line in source:
+                text = line.strip()
+                if matched < len(kept) and line == kept[matched]:
+                    matched, removed = matched + 1, False
+                    continue
+                assert text.startswith('WlrLayershell.') or (removed and text.startswith(('?', ':'))), (copy, line)
+                removed = True
+            assert matched == len(kept), copy
+            if copy.name == 'KeyboardPanel.qml':
+                assert not any(('focusPrimed ? WlrKeyboardFocus' in line or line.strip() == ': WlrKeyboardFocus.None') for line in kept), copy
+                assert any(line.strip() == 'onBackingWindowVisibleChanged: beginFocusPrime()' for line in kept), copy
         fake = tmp / 'omarchy-govee'
         fake.write_text('''#!/usr/bin/env python3
 import json, os, sys, time
@@ -54,6 +89,7 @@ ShellRoot {
   id: test
   property int stage: 0
   property var menu: menuLoader.item
+  property var bar: barLoader.item
   Component.onCompleted: console.log("GOVEE_QML_START")
   function check(ok, message) { if (!ok) throw new Error(message) }
   function find(node, name) {
@@ -66,12 +102,15 @@ ShellRoot {
     return null
   }
   Loader { id: menuLoader; source: "plugin/GoveeMenu.qml"; asynchronous: true }
+  Loader { id: barLoader; source: "plugin/Govee.qml"; asynchronous: true }
   Timer {
     interval: 100
     repeat: true
     running: true
     onTriggered: {
       try {
+        if (menuLoader.status === Loader.Error) test.check(false, "load failed: " + menuLoader.source)
+        if (barLoader.status === Loader.Error) test.check(false, "load failed: " + barLoader.source)
         if (!menu) return
         if (test.stage === 0) { menu.open("{}"); test.stage++; return }
         if (test.stage === 1) {
@@ -130,13 +169,41 @@ ShellRoot {
           menu.back()
           test.check(search.text === "", "escape clears search")
           menu.close()
+          test.stage++
+          return
+        }
+        if (test.stage === 3) {
+          if (!bar || bar.devices.length !== 1 || bar.roomList.length < 1 || bar.loading) return
+          test.stage++
+          return
+        }
+        if (test.stage === 4) {
+          bar.open()
+          test.check(bar.opened, "bar did not open")
+          test.stage++
+          return
+        }
+        if (test.stage === 5) {
+          if (bar.loading) return
+          bar.expandedName = "room:Office"
+          test.check(bar.expandedName === "room:Office", "room expands")
+          test.stage++
+          return
+        }
+        if (test.stage === 6) {
+          bar.expandedName = "AA:01"
+          test.check(bar.expandedName === "AA:01", "device expands")
+          test.stage++
+          return
+        }
+        if (test.stage === 7) {  // one more tick so the expanded device is laid out
           console.log("GOVEE_QML_PASS")
           Qt.quit()
         }
       } catch (e) { console.error("GOVEE_QML_FAIL: " + e); Qt.quit() }
     }
   }
-  Timer { interval: 8000; running: true; onTriggered: { console.error("GOVEE_QML_FAIL: timeout"); Qt.quit() } }
+  Timer { interval: 15000; running: true; onTriggered: { console.error("GOVEE_QML_FAIL: timeout"); Qt.quit() } }
 }
 '''.replace('PLUGIN', 'plugin')
         (tmp / 'shell.qml').write_text(qml)
@@ -154,7 +221,7 @@ ShellRoot {
             assert number.isdigit(), display.stderr.read()
             env['DISPLAY'] = ':' + number
             result = subprocess.run([shutil.which('qs'), '--no-color', '-p', str(tmp / 'shell.qml')],
-                                    env=env, text=True, capture_output=True, timeout=20)
+                                    env=env, text=True, capture_output=True, timeout=25)
         except subprocess.TimeoutExpired as exc:
             print(exc.stdout, exc.stderr)
             print('calls:', (tmp / 'calls.jsonl').read_text() if (tmp / 'calls.jsonl').exists() else 'none')
@@ -165,10 +232,14 @@ ShellRoot {
         output = result.stdout + result.stderr
         print(output)
         assert result.returncode == 0 and 'GOVEE_QML_PASS' in output and 'GOVEE_QML_FAIL' not in output
+        allowed = 'WARN: $HYPRLAND_INSTANCE_SIGNATURE is unset. Cannot connect to hyprland.'
+        bad = [line for line in output.splitlines()
+               if (re.search(r'\b(WARN|ERROR)\b', line) or 'Error:' in line) and line.strip() != allowed]
+        assert not bad, 'unexpected qs output:\n' + '\n'.join(bad)
         calls = [json.loads(line) for line in (tmp / 'calls.jsonl').read_text().splitlines()]
         actions = [call for call in calls if call != ['dump']]
         assert actions == [['--json','brightness','35','AA:01'], ['--json','on','AA:01'], ['--json','off','AA:01']], actions
-        print('QML runtime: menu loaded, navigation, forms, queued actions and reopen passed')
+        print('QML runtime: menu and bar panel loaded, navigation, forms, queued actions, reopen and bar expansion passed')
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Govee lights: a bar button that opens a dropdown of scenes, rooms and
@@ -47,7 +48,7 @@ BarWidget {
   implicitHeight: button.implicitHeight
 
   // Tokens from eldtechnologies/omarchy-plugin-govee Panel.qml (MIT).
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color surface: Util.alpha(foreground, 0.05)
@@ -158,7 +159,7 @@ BarWidget {
     text: label
     bordered: outlined
     foreground: root.foreground
-    accent: Color.accent
+    accent: Commons.Color.accent
     fontFamily: root.fontFamily
     fontSize: Style.font.bodySmall
     opacity: enabled ? 1 : 0.4
@@ -790,11 +791,11 @@ BarWidget {
                               modelData === roomItem.room.name
                             radius: Style.cornerRadius
                             color: current || chipMouse.containsMouse
-                              ? Style.selectedFillFor(root.foreground, Color.accent)
+                              ? Style.selectedFillFor(root.foreground, Commons.Color.accent)
                               : "transparent"
                             border.width: 1
                             border.color: Style.selectedFillFor(root.foreground,
-                                                                Color.accent)
+                                                                Commons.Color.accent)
                             implicitWidth: chipLabel.implicitWidth + Style.space(12)
                             implicitHeight: chipLabel.implicitHeight + Style.space(6)
 
@@ -900,7 +901,7 @@ BarWidget {
                 radius: Style.cornerRadius
                 color: "transparent"
                 border.width: 1
-                border.color: Style.selectedFillFor(root.foreground, Color.accent)
+                border.color: Style.selectedFillFor(root.foreground, Commons.Color.accent)
               }
             }
           }

@@ -5,6 +5,7 @@ import Quickshell
 import Quickshell.Wayland
 import Quickshell.Hyprland
 import qs.Commons
+import qs.Commons as Commons
 import "GoveeMenuModel.js" as Model
 
 Item {
@@ -148,7 +149,7 @@ Item {
     WlrLayershell.keyboardFocus: root.opened ? WlrKeyboardFocus.Exclusive : WlrKeyboardFocus.None
     onBackingWindowVisibleChanged: if (backingWindowVisible) root.focusInput()
 
-    Rectangle { anchors.fill: parent; color: Color.menu.scrim }
+    Rectangle { anchors.fill: parent; color: Commons.Color.menu.scrim }
     MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
 
     Rectangle {
@@ -156,8 +157,8 @@ Item {
       anchors.centerIn: parent
       width: Math.min(Style.space(620), panel.width - Style.gapsOut * 2)
       height: Math.min(Style.space(580), panel.height - Style.gapsOut * 2)
-      color: Color.menu.background
-      border.color: Color.menu.border
+      color: Commons.Color.menu.background
+      border.color: Commons.Color.menu.border
       border.width: 1
       radius: Style.space(4)
       MouseArea { anchors.fill: parent }
@@ -171,7 +172,7 @@ Item {
           Layout.fillWidth: true
           Text {
             text: root.heading
-            color: Color.menu.text
+            color: Commons.Color.menu.text
             font.family: "sans-serif"
             font.pixelSize: Math.max(22, Style.font.title)
             font.bold: true
@@ -186,12 +187,12 @@ Item {
           Layout.fillWidth: true
           visible: !root.form
           placeholderText: "Type to filter…"
-          color: Color.menu.text
+          color: Commons.Color.menu.text
           font.family: "sans-serif"
           font.pixelSize: Math.max(18, Style.font.body * 1.2)
           Accessible.name: "Filter lights and actions"
           background: Item {}
-          placeholderTextColor: Color.menu.text
+          placeholderTextColor: Commons.Color.menu.text
           leftPadding: 0
           rightPadding: 0
           onTextChanged: root.selected = 0
@@ -203,12 +204,12 @@ Item {
           objectName: "editor"
           Layout.fillWidth: true
           visible: !!root.form
-          color: Color.menu.text
+          color: Commons.Color.menu.text
           font.family: "sans-serif"
           font.pixelSize: Math.max(18, Style.font.body * 1.2)
           Accessible.name: root.heading
           background: Item {}
-          placeholderTextColor: Color.menu.text
+          placeholderTextColor: Commons.Color.menu.text
           leftPadding: 0
           rightPadding: 0
           onAccepted: root.submit()
@@ -236,7 +237,7 @@ Item {
             Accessible.onPressAction: { root.selected = index; root.activate() }
             Text {
               text: root.selected === index ? "›" : ""
-              color: Color.menu.text
+              color: Commons.Color.menu.text
               font.pixelSize: Math.max(18, Style.font.body * 1.2)
               anchors.top: parent.top
               anchors.topMargin: Style.space(8)
@@ -244,9 +245,9 @@ Item {
             Text {
               text: Model.icon(modelData, root.view)
               color: modelData.device
-                ? (modelData.device.online === false ? Color.urgent
-                  : modelData.device.online === true && modelData.device.power === 1 ? Color.accent : Color.muted)
-                : Color.accent
+                ? (modelData.device.online === false ? Commons.Color.urgent
+                  : modelData.device.online === true && modelData.device.power === 1 ? Commons.Color.accent : Commons.Color.muted)
+                : Commons.Color.accent
               font.family: Style.font.family
               font.pixelSize: Math.max(18, Style.font.body * 1.2)
               anchors.left: parent.left
@@ -265,7 +266,7 @@ Item {
                 text: modelData.label
                 font.weight: root.selected === index ? Font.Bold : Font.DemiBold
                 opacity: root.selected === index ? 1 : 0.85
-                color: root.selected === index ? Color.accent : Color.menu.text
+                color: root.selected === index ? Commons.Color.accent : Commons.Color.menu.text
                 font.family: "sans-serif"
                 font.pixelSize: Math.max(18, Style.font.body * 1.2)
                 elide: Text.ElideRight
@@ -273,7 +274,7 @@ Item {
               Text {
                 width: parent.width
                 text: modelData.detail || ""
-                color: Color.menu.text
+                color: Commons.Color.menu.text
                 opacity: 0.9
                 font.family: "sans-serif"
                 font.pixelSize: Math.max(15, Style.font.caption * 1.2)
@@ -290,7 +291,7 @@ Item {
             anchors.centerIn: parent
             visible: !root.rows.length
             text: client.loading ? "Loading lights…" : "No matches"
-            color: Color.menu.text
+            color: Commons.Color.menu.text
             font.family: "sans-serif"
           }
         }
@@ -299,7 +300,7 @@ Item {
           Layout.fillWidth: true
           visible: !!text
           text: client.error || root.message || (client.loading ? "Refreshing…" : "")
-          color: Color.menu.text
+          color: Commons.Color.menu.text
           font.family: "sans-serif"
           font.pixelSize: Math.max(15, Style.font.caption * 1.2)
           font.weight: root.failed || client.error ? Font.Bold : Font.Medium
@@ -311,7 +312,7 @@ Item {
           Layout.fillWidth: true
           text: (client.busy ? "Working… · " : "") + (root.form ? "Enter save · Esc cancel"
             : "↑↓ select · ← back · → open · Enter apply · Esc back/close · F5 reload")
-          color: Color.menu.text
+          color: Commons.Color.menu.text
           opacity: 0.9
           font.family: "sans-serif"
           font.pixelSize: Math.max(15, Style.font.caption * 1.2)
