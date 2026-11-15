@@ -1,5 +1,5 @@
 ---
-status: draft
+status: approved
 issue: none  # repo convention so far; add the issue number if one is opened
 author: olafkfreund
 ---
