@@ -30,10 +30,10 @@ BarWidget {
   property var roomNames: []     // room keys only, for the assign chips
   property var scenes: []
   property string expandedName: ""
-  readonly property bool loading: client.loading
-  readonly property string refreshError: client.error
+  readonly property bool loading: GoveeClient.loading
+  readonly property string refreshError: GoveeClient.error
   property bool lit: false
-  readonly property string busyName: client.busyName
+  readonly property string busyName: GoveeClient.busyName
   // PanelKeyCatcher eats plain keys before descendants see them; while a name
   // field is focused it has to stand down or "a" toggles a light mid-word.
   property int editors: 0
@@ -88,14 +88,14 @@ BarWidget {
 
   onOpenedChanged: if (opened) refresh()
 
-  function refresh() { client.refresh() }
-  function act(args, label) { client.act(args, label) }
+  function refresh() { GoveeClient.refresh() }
+  function act(args, label) { GoveeClient.act(args, label, "bar") }
 
-  GoveeClient {
-    id: client
-    onSnapshotChanged: if (snapshot) root.applyDump(JSON.stringify(snapshot))
-    onCompleted: function (success, message) {
-      if (!success)
+  Connections {
+    target: GoveeClient
+    function onSnapshotChanged() { if (GoveeClient.snapshot) root.applyDump(JSON.stringify(GoveeClient.snapshot)) }
+    function onCompleted(success, message, origin) {
+      if (!success && origin === "bar")
         Quickshell.execDetached(["notify-send", "-u", "critical", "-a", "Omarchy",
                                  "Govee failed", message || "Command failed"])
     }
