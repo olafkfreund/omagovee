@@ -89,13 +89,13 @@ BarWidget {
   onOpenedChanged: if (opened) refresh()
 
   function refresh() { GoveeClient.refresh() }
-  function act(args, label) { GoveeClient.act(args, label) }
+  function act(args, label) { GoveeClient.act(args, label, "bar") }
 
   Connections {
     target: GoveeClient
     function onSnapshotChanged() { if (GoveeClient.snapshot) root.applyDump(JSON.stringify(GoveeClient.snapshot)) }
-    function onCompleted(success, message) {
-      if (!success)
+    function onCompleted(success, message, origin) {
+      if (!success && origin === "bar")
         Quickshell.execDetached(["notify-send", "-u", "critical", "-a", "Omarchy",
                                  "Govee failed", message || "Command failed"])
     }

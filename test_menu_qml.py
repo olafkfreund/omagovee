@@ -156,8 +156,29 @@ ShellRoot {
           return
         }
         if (test.stage === 2) {
-          if (menu.message !== "Done" || Govee.GoveeClient.busy) return
+          if (Govee.GoveeClient.busy) return
           test.check(!menu.opened, "actions reopened menu")
+          test.check(!!Govee.GoveeClient.menuResult, "hidden menu keeps its result pending")
+          bar.act(["on", "all"], "")
+          test.stage = 20
+          return
+        }
+        if (test.stage === 20) {
+          if (Govee.GoveeClient.busy) return
+          test.check(Govee.GoveeClient.menuResult !== null, "bar result must not clear the menu result")
+          menu.message = "stale"
+          menu.failed = true
+          menu.open("{}")
+          test.check(menu.message === "Done" && !menu.failed, "reopen shows the pending menu result")
+          test.check(Govee.GoveeClient.menuResult === null, "shown result is cleared")
+          menu.close()
+          menu.open("{}")
+          test.check(menu.message === "" && !menu.failed, "result shown once")
+          menu.close()
+          test.stage = 21
+          return
+        }
+        if (test.stage === 21) {
           menu.open("{}")
           test.check(menu.view === "targets", "reopen resets navigation")
           var up = {key: Qt.Key_Up, modifiers: Qt.NoModifier, accepted: false}
@@ -169,7 +190,7 @@ ShellRoot {
           menu.back()
           test.check(search.text === "", "escape clears search")
           menu.close()
-          test.stage++
+          test.stage = 3
           return
         }
         if (test.stage === 3) {
@@ -238,7 +259,7 @@ ShellRoot {
         assert not bad, 'unexpected qs output:\n' + '\n'.join(bad)
         calls = [json.loads(line) for line in (tmp / 'calls.jsonl').read_text().splitlines()]
         actions = [call for call in calls if call != ['dump']]
-        assert actions == [['--json','brightness','35','AA:01'], ['--json','on','AA:01'], ['--json','off','AA:01']], actions
+        assert actions == [['--json','brightness','35','AA:01'], ['--json','on','AA:01'], ['--json','off','AA:01'], ['on','all']], actions
         print('QML runtime: menu and bar panel loaded, navigation, forms, queued actions, reopen and bar expansion passed')
 
 

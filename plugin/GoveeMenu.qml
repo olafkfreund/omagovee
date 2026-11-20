@@ -34,10 +34,20 @@ Item {
     form = ""
     search.text = ""
     message = ""
+    failed = false
     selected = 0
     opened = true
+    showResult()
     GoveeClient.refresh()
     focusInput()
+  }
+
+  function showResult() {
+    var r = GoveeClient.menuResult
+    if (!r) return
+    failed = !r.success
+    message = Model.resultMessage(r.success, r.message)
+    if (opened) GoveeClient.menuResult = null
   }
 
   function close() { opened = false }
@@ -82,7 +92,7 @@ Item {
   function send(args) {
     message = "Queued…"
     failed = false
-    GoveeClient.act(args, target ? target.target : "scene")
+    GoveeClient.act(args, target ? target.target : "scene", "menu")
   }
   function submit() {
     try {
@@ -115,9 +125,8 @@ Item {
 
   Connections {
     target: GoveeClient
-    function onCompleted(success, output) {
-      root.failed = !success
-      root.message = Model.resultMessage(success, output)
+    function onCompleted(success, output, origin) {
+      if (origin === "menu") root.showResult()
     }
     function onSnapshotChanged() {
       // Refresh state without changing the selected device identity.
