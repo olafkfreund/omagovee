@@ -19,7 +19,7 @@ Item {
   property string message: ""
   property bool failed: false
   property int selected: 0
-  readonly property var rows: Model.filter(Model.rows(view, client.snapshot, target), search.text)
+  readonly property var rows: Model.filter(Model.rows(view, GoveeClient.snapshot, target), search.text)
   readonly property string heading: form ? ({ brightness: "Brightness (0–100)", color: "Custom RGB colour",
       label: "Friendly name (empty clears)", newroom: "New room", rename: "Rename room" })[form]
     : view === "targets" ? "Govee lights" : view === "scenes" ? "Scenes"
@@ -36,15 +36,12 @@ Item {
     message = ""
     selected = 0
     opened = true
-    client.refresh()
+    GoveeClient.refresh()
     focusInput()
   }
 
   function close() { opened = false }
-  function dismiss() {
-    if (shell) shell.hide(manifest ? manifest.id : "olafkfreund.govee")
-    else close()
-  }
+  function dismiss() { close() }
   function focusInput() {
     Qt.callLater(function () {
       if (root.opened) (root.form ? editor : search).forceActiveFocus()
@@ -85,7 +82,7 @@ Item {
   function send(args) {
     message = "Queued…"
     failed = false
-    client.act(args, target ? target.target : "scene")
+    GoveeClient.act(args, target ? target.target : "scene")
   }
   function submit() {
     try {
@@ -105,7 +102,7 @@ Item {
   }
   function handleKey(event) {
     if (event.key === Qt.Key_Escape || (event.key === Qt.Key_Left && (event.modifiers & Qt.AltModifier))) back()
-    else if (event.key === Qt.Key_F5 || (event.key === Qt.Key_R && (event.modifiers & Qt.ControlModifier))) client.refresh()
+    else if (event.key === Qt.Key_F5 || (event.key === Qt.Key_R && (event.modifiers & Qt.ControlModifier))) GoveeClient.refresh()
     else if (!form && event.key === Qt.Key_Right && ((event.modifiers & Qt.AltModifier) || !search.text)) forward()
     else if (!form && event.key === Qt.Key_Left && !search.text) back()
     else if (!form && event.key === Qt.Key_Down) move(1)
@@ -116,26 +113,25 @@ Item {
   }
   onRowsChanged: selected = Math.max(0, Math.min(selected, rows.length - 1))
 
-  GoveeClient {
-    id: client
-    objectName: "goveeClient"
-    onCompleted: function (success, output) {
+  Connections {
+    target: GoveeClient
+    function onCompleted(success, output) {
       root.failed = !success
       root.message = Model.resultMessage(success, output)
     }
-    onSnapshotChanged: {
+    function onSnapshotChanged() {
       // Refresh state without changing the selected device identity.
       if (root.target && root.target.kind === "device") {
-        var updated = Model.targets(snapshot).find(function (r) { return r.id === root.target.id })
+        var updated = Model.targets(GoveeClient.snapshot).find(function (r) { return r.id === root.target.id })
         if (updated) root.target = updated
       }
     }
   }
   Timer {
     interval: 60000
-    running: root.opened && !root.form && !client.busy
+    running: root.opened && !root.form && !GoveeClient.busy
     repeat: true
-    onTriggered: client.refresh()
+    onTriggered: GoveeClient.refresh()
   }
 
   PanelWindow {
@@ -290,7 +286,7 @@ Item {
           Text {
             anchors.centerIn: parent
             visible: !root.rows.length
-            text: client.loading ? "Loading lights…" : "No matches"
+            text: GoveeClient.loading ? "Loading lights…" : "No matches"
             color: Commons.Color.menu.text
             font.family: "sans-serif"
           }
@@ -299,18 +295,18 @@ Item {
         Text {
           Layout.fillWidth: true
           visible: !!text
-          text: client.error || root.message || (client.loading ? "Refreshing…" : "")
+          text: GoveeClient.error || root.message || (GoveeClient.loading ? "Refreshing…" : "")
           color: Commons.Color.menu.text
           font.family: "sans-serif"
           font.pixelSize: Math.max(15, Style.font.caption * 1.2)
-          font.weight: root.failed || client.error ? Font.Bold : Font.Medium
+          font.weight: root.failed || GoveeClient.error ? Font.Bold : Font.Medium
           wrapMode: Text.Wrap
           maximumLineCount: 4
           elide: Text.ElideRight
         }
         Text {
           Layout.fillWidth: true
-          text: (client.busy ? "Working… · " : "") + (root.form ? "Enter save · Esc cancel"
+          text: (GoveeClient.busy ? "Working… · " : "") + (root.form ? "Enter save · Esc cancel"
             : "↑↓ select · ← back · → open · Enter apply · Esc back/close · F5 reload")
           color: Commons.Color.menu.text
           opacity: 0.9

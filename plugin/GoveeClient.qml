@@ -1,8 +1,13 @@
+pragma Singleton
+
 import QtQuick
+import Quickshell
 import Quickshell.Io
 
-// Shared CLI boundary for both views. No device protocol or optimistic state.
-Item {
+// Shared CLI boundary for both views, one instance (qmldir): a running command,
+// its queue and the last snapshot survive the menu being unloaded.
+// No device protocol or optimistic state.
+Singleton {
   id: root
   property var snapshot: null
   property string error: ""

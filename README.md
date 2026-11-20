@@ -418,8 +418,10 @@ updating scenes that use its old name.
 State, busy messages, validation errors and partial command failures are shown
 in the menu. Cloud acceptance is identified as unverified. Actions queue in
 order and continue if the menu is dismissed; opening it again refreshes state.
-The menu retains its component while closed but does not poll in the background.
-The shared `GoveeClient.qml` runs the same controller for both views.
+The menu can be unloaded while a command runs: `GoveeClient.qml` is a singleton
+(listed in `plugin/qmldir`) shared by the bar widget and the menu, so the running
+command, its queue and the latest state stay in it. Esc and a click away only hide
+the menu. The menu does not poll in the background.
 
 ### Menu development checks
 

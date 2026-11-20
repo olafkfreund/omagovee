@@ -123,7 +123,7 @@ ShellRoot {
           test.check(menu.view === "actions" && menu.target.target === "AA:01", "target navigation")
           menu.selected = 0
           menu.handleKey(right)
-          test.check(!test.find(menu, "goveeClient").busy, "right arrow must not send a power command")
+          test.check(!Govee.GoveeClient.busy, "right arrow must not send a power command")
           var left = {key: Qt.Key_Left, modifiers: Qt.AltModifier, accepted: false}
           menu.handleKey(left)
           test.check(menu.view === "targets" && left.accepted, "alt-left back")
@@ -156,7 +156,7 @@ ShellRoot {
           return
         }
         if (test.stage === 2) {
-          if (menu.message !== "Done" || test.find(menu, "goveeClient").busy) return
+          if (menu.message !== "Done" || Govee.GoveeClient.busy) return
           test.check(!menu.opened, "actions reopened menu")
           menu.open("{}")
           test.check(menu.view === "targets", "reopen resets navigation")
